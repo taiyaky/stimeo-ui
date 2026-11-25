@@ -62,8 +62,12 @@
     </button>
   </div>
 
-  <span class="drp__status" role="status" aria-live="polite"
-        data-stimeo--date-range-picker-target="status"></span>
+  <span class="drp__status" role="status" aria-live="polite" aria-atomic="true">
+    <span class="visually-hidden">
+      <%= t("components.date_range_picker.demo.range_selected") %>
+    </span>
+    <span data-stimeo--date-range-picker-target="status"></span>
+  </span>
 
   <%# Says on screen why two days are struck out. The dates move with today, so
       without this the exclusion reads as a glitch rather than a demonstration. %>

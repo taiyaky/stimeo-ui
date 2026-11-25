@@ -1183,3 +1183,242 @@ describe("AttributeLease records", () => {
     });
   });
 });
+
+describe("AttributeLease authored value adoption", () => {
+  it.each([null, "", "authored"])(
+    "adopts an observed page value %s without writing it",
+    (value) => {
+      const element = document.createElement("div");
+      const lease = new AttributeLease("aria-checked", "stimeo--adopting");
+      lease.write(element, "false");
+      if (value === null) element.removeAttribute("aria-checked");
+      else element.setAttribute("aria-checked", value);
+      const set = vi.spyOn(element, "setAttribute");
+      const remove = vi.spyOn(element, "removeAttribute");
+      expect(lease.adopt(element)).toBe(true);
+      expect(set.mock.calls.some(([name]) => name === "aria-checked")).toBe(false);
+      expect(remove.mock.calls.some(([name]) => name === "aria-checked")).toBe(false);
+      lease.write(element, "true");
+      lease.return(element);
+      expect(element.getAttribute("aria-checked")).toBe(value);
+    },
+  );
+
+  it("keeps an explicitly repeated value as authored after another controlled write", () => {
+    const element = document.createElement("div");
+    const lease = new AttributeLease("aria-checked", "stimeo--repeat");
+    lease.write(element, "false");
+    element.setAttribute("aria-checked", "false");
+    lease.adopt(element);
+    lease.write(element, "true");
+    lease.return(element);
+    expect(element.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("retains an unchanged hold when a connection resumes", () => {
+    const element = document.createElement("div");
+    const lease = new AttributeLease("tabindex", "stimeo--resuming");
+    lease.write(element, "0");
+    expect(lease.adopt(element, { ifChanged: true })).toBe(false);
+    lease.return(element);
+    expect(element.hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("adopts a changed value when a connection resumes", () => {
+    const element = document.createElement("div");
+    const lease = new AttributeLease("tabindex", "stimeo--changed");
+    lease.write(element, "0");
+    element.setAttribute("tabindex", "7");
+    expect(lease.adopt(element, { ifChanged: true })).toBe(true);
+    lease.write(element, "-1");
+    lease.return(element);
+    expect(element.getAttribute("tabindex")).toBe("7");
+  });
+
+  it("keeps a covering hold during a resumed connection", () => {
+    const element = document.createElement("div");
+    const lower = new AttributeLease("tabindex", "stimeo--lower");
+    const upper = new AttributeLease("tabindex", "stimeo--upper");
+    lower.write(element, "0");
+    upper.write(element, "-1");
+    expect(lower.adopt(element, { ifChanged: true })).toBe(false);
+    upper.return(element);
+    expect(element.getAttribute("tabindex")).toBe("0");
+    lower.return(element);
+    expect(element.hasAttribute("tabindex")).toBe(false);
+  });
+
+  it.each(["lower", "upper"] as const)(
+    "carries the new authored value through linked holds when %s returns first",
+    (first) => {
+      const element = document.createElement("div");
+      element.setAttribute("tabindex", "authored");
+      const lower = new AttributeLease("tabindex", "stimeo--linked-lower");
+      const upper = new AttributeLease("tabindex", "stimeo--linked-upper");
+      lower.write(element, "0");
+      upper.write(element, "-1");
+      element.setAttribute("tabindex", "page");
+      lower.adopt(element);
+      lower.write(element, "1");
+      upper.write(element, "2");
+      if (first === "lower") {
+        lower.return(element);
+        expect(element.getAttribute("tabindex")).toBe("2");
+        upper.return(element);
+      } else {
+        upper.return(element);
+        expect(element.getAttribute("tabindex")).toBe("1");
+        lower.return(element);
+      }
+      expect(element.getAttribute("tabindex")).toBe("page");
+    },
+  );
+
+  it("makes an adopted upper hold independent of the value underneath", () => {
+    const element = document.createElement("div");
+    const lower = new AttributeLease("tabindex", "stimeo--independent-lower");
+    const upper = new AttributeLease("tabindex", "stimeo--independent-upper");
+    lower.write(element, "0");
+    upper.write(element, "-1");
+    element.setAttribute("tabindex", "7");
+    upper.adopt(element);
+    upper.write(element, "1");
+    upper.return(element);
+    expect(element.getAttribute("tabindex")).toBe("7");
+    lower.return(element);
+    expect(element.getAttribute("tabindex")).toBe("7");
+  });
+
+  it("preserves adopted stacked values on a restored copy", () => {
+    const element = document.createElement("div");
+    const lower = new AttributeLease("tabindex", "stimeo--copied-lower");
+    const upper = new AttributeLease("tabindex", "stimeo--copied-upper");
+    lower.write(element, "0");
+    upper.write(element, "-1");
+    element.setAttribute("tabindex", "7");
+    lower.adopt(element);
+    lower.write(element, "1");
+    upper.write(element, "2");
+    const copy = element.cloneNode(true) as HTMLElement;
+    const copiedLower = new AttributeLease("tabindex", "stimeo--copied-lower");
+    const copiedUpper = new AttributeLease("tabindex", "stimeo--copied-upper");
+    copiedLower.return(copy);
+    expect(copy.getAttribute("tabindex")).toBe("2");
+    copiedUpper.return(copy);
+    expect(copy.getAttribute("tabindex")).toBe("7");
+    expect(copy.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("takes an adopted copy into the lease's held population", () => {
+    const element = document.createElement("div");
+    const owner = "stimeo--adopted-copy";
+    new AttributeLease("tabindex", owner).write(element, "0");
+    const copy = element.cloneNode(true) as HTMLElement;
+    copy.setAttribute("tabindex", "7");
+    const restored = new AttributeLease("tabindex", owner);
+    expect(restored.adopt(copy, { ifChanged: true })).toBe(true);
+    restored.returnAll();
+    expect(copy.getAttribute("tabindex")).toBe("7");
+    expect(copy.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("leaves an unreadable ownership record unadopted without throwing", () => {
+    const element = document.createElement("div");
+    const lease = new AttributeLease("aria-checked", "stimeo--unreadable-adopter");
+    element.setAttribute("aria-checked", "true");
+    element.setAttribute("data-stimeo--unreadable-adopter-aria-checked-lease", "{");
+    const before = element.outerHTML;
+    let adopted: boolean | undefined;
+
+    expect(() => {
+      adopted = lease.adopt(element, { ifChanged: true });
+    }).not.toThrow();
+    expect(adopted).toBe(false);
+    expect(element.outerHTML).toBe(before);
+  });
+
+  it("keeps an unrelated copied lease unknown when its record is removed before return", () => {
+    const element = document.createElement("div");
+    const owner = "stimeo--unclaimed-copy";
+    new AttributeLease("aria-checked", owner).write(element, "false");
+    const copy = element.cloneNode(true) as HTMLElement;
+    const unrelated = new AttributeLease("aria-checked", "stimeo--unheld-copy-adopter");
+    expect(unrelated.adopt(copy)).toBe(false);
+    copy.removeAttribute(`data-${owner}-aria-checked-lease`);
+    const restored = new AttributeLease("aria-checked", owner);
+
+    expect(restored.return(copy)).toBe(false);
+    expect(copy.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("preserves an independently adopted upper baseline when a lower hold later adopts", () => {
+    const element = document.createElement("div");
+    const lower = new AttributeLease("tabindex", "stimeo--barrier-lower");
+    const middle = new AttributeLease("tabindex", "stimeo--barrier-middle");
+    const upper = new AttributeLease("tabindex", "stimeo--barrier-upper");
+    lower.write(element, "0");
+    middle.write(element, "1");
+    upper.write(element, "2");
+    element.setAttribute("tabindex", "7");
+    middle.adopt(element);
+    element.setAttribute("tabindex", "9");
+    lower.adopt(element);
+    upper.write(element, "3");
+    upper.return(element);
+    expect(element.getAttribute("tabindex")).toBe("1");
+    middle.return(element);
+
+    expect(element.getAttribute("tabindex")).toBe("7");
+    lower.return(element);
+    expect(element.getAttribute("tabindex")).toBe("7");
+  });
+
+  it("carries an adopted repeated value into a copy before another controlled write", () => {
+    const element = document.createElement("div");
+    const owner = "stimeo--immediate-adopt-copy";
+    const lease = new AttributeLease("aria-checked", owner);
+    lease.write(element, "false");
+    element.setAttribute("aria-checked", "false");
+    lease.adopt(element);
+    const copy = element.cloneNode(true) as HTMLElement;
+    const restored = new AttributeLease("aria-checked", owner);
+    restored.write(copy, "true");
+    restored.return(copy);
+
+    expect(copy.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("leaves an unheld element untouched", () => {
+    const element = document.createElement("div");
+    const lease = new AttributeLease("tabindex", "stimeo--unheld");
+    element.setAttribute("tabindex", "7");
+    expect(lease.adopt(element)).toBe(false);
+    expect(element.outerHTML).toBe('<div tabindex="7"></div>');
+  });
+});
+
+describe("AttributeLease write notification", () => {
+  it("notifies before a real attribute write, once for each change", () => {
+    const element = document.createElement("div");
+    const lease = new AttributeLease("tabindex", "stimeo--notified");
+    const before: Array<string | null> = [];
+    const callback = () => before.push(element.getAttribute("tabindex"));
+    lease.write(element, "0", callback);
+    lease.write(element, "0", callback);
+    lease.write(element, null, callback);
+    expect(before).toEqual([null, "0"]);
+  });
+
+  it("does not notify for a write covered by another lease", () => {
+    const element = document.createElement("div");
+    const lower = new AttributeLease("tabindex", "stimeo--silent-lower");
+    const upper = new AttributeLease("tabindex", "stimeo--silent-upper");
+    lower.write(element, "0");
+    upper.write(element, "-1");
+    const callback = vi.fn();
+    lower.write(element, "1", callback);
+    expect(callback).not.toHaveBeenCalled();
+    upper.return(element);
+    expect(element.getAttribute("tabindex")).toBe("1");
+  });
+});

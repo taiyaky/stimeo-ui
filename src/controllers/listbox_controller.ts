@@ -2,7 +2,6 @@ import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
-import { setAttributeIfChanged } from "../utils/attribute_write";
 import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { commitField, writeField } from "../utils/field_mirror";
 import { ListenerSet } from "../utils/listener_set";
@@ -142,12 +141,19 @@ export class ListboxController extends Controller<HTMLElement> {
   readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileOptions());
   /** Watches the option attributes a page can rewrite in place; set while connected. */
   readonly #observer = new AuthoredMutationWatcher((records) => {
+    this.#adoptOptionWrites(records);
     if (this.#concernsOptions(records)) this.#reconcile.schedule();
   });
+  /** Borrows selection attributes until an option leaves this scope. */
+  readonly #selected = new AttributeLease<HTMLElement>("aria-selected", this.identifier);
+  /** Options whose selection attributes belong to this controller. */
+  readonly #managedOptions = new Set<HTMLElement>();
   /** The selection last settled: on connect, by a selection, or by a reported pass. */
   #settled: Selection = { option: null, value: "" };
-  /** The list this listbox opened, while it is open; `null` once closed. */
-  #shownList: HTMLElement | null = null;
+  /** The first list to which the open state was applied. */
+  #list: HTMLElement | null = null;
+  /** The open state retained while the list is absent. */
+  #open = false;
   /** Borrows `hidden` on the list, to give back when an element stops being the list. */
   readonly #listHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
   /**
@@ -171,6 +177,11 @@ export class ListboxController extends Controller<HTMLElement> {
    * starts closed, and listens for outside clicks.
    */
   override connect(): void {
+    const options = new Set(this.optionTargets);
+    for (const option of this.#managedOptions) {
+      this.#selected.adopt(option, { ifChanged: true });
+      if (!options.has(option)) this.#releaseOption(option);
+    }
     this.#normalizeSelection();
     this.close();
     this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
@@ -184,17 +195,24 @@ export class ListboxController extends Controller<HTMLElement> {
    * selection baseline and re-resolves active identity once the batch is in.
    */
   optionTargetConnected(option: HTMLElement): void {
-    option.removeAttribute("data-active");
+    if (!this.#managedOptions.has(option)) option.removeAttribute("data-active");
     this.#reconcile.schedule();
   }
 
-  /**
-   * Removes controller-owned active state, then settles the selection and the
-   * active option among the surviving targets once the batch is in.
-   */
+  /** Returns a departing option's selection attribute and removes its active output. */
   optionTargetDisconnected(option: HTMLElement): void {
-    option.removeAttribute("data-active");
+    if (!this.scope.containsElement(option) || !this.optionTargets.includes(option)) {
+      this.#flushMutations();
+      this.#releaseOption(option);
+    }
     this.#reconcile.schedule();
+  }
+
+  /** Releases one option without rewinding the label or the field's content. */
+  #releaseOption(option: HTMLElement): void {
+    this.#managedOptions.delete(option);
+    this.#selected.return(option);
+    option.removeAttribute("data-active");
   }
 
   /** Brings a trigger inserted or replaced at runtime to the open state. */
@@ -228,7 +246,7 @@ export class ListboxController extends Controller<HTMLElement> {
    */
   listTargetDisconnected(list: HTMLElement): void {
     if (!this.listTargets.includes(list)) {
-      if (list === this.#shownList) this.#adoptPageClose();
+      if (list === this.#list) this.#reconcileOpenState();
       this.#listHidden.return(list);
     }
     this.#reconcile.schedule();
@@ -306,31 +324,26 @@ export class ListboxController extends Controller<HTMLElement> {
   }
 
   /**
-   * Brings the list and the trigger that stay first to one open state. A list that
-   * took over from the one this listbox opened is shown; the list this listbox
-   * opened, found hidden while it is still a target, was closed by the page. The
-   * trigger's `aria-expanded` then follows the list. With no list left, nothing is
-   * written.
+   * Transfers the open state before handling an interaction or a target change.
+   * The visibility of the previous list includes later page writes. While no list
+   * is present, the trigger still describes the retained open state.
    */
   #reconcileOpenState(): void {
-    if (!this.hasListTarget) {
-      this.#shownList = null;
-      return;
-    }
-    if (this.#shownList && this.listTargets.includes(this.#shownList)) this.#adoptPageClose();
-    const list = this.listTarget;
-    if (this.#shownList !== null && list !== this.#shownList) {
-      this.#listHidden.write(list, null);
-      this.#shownList = list;
+    const previous = this.#list;
+    if (previous) this.#open = !previous.hidden;
+    const list = this.hasListTarget ? this.listTarget : null;
+    if (list !== previous) {
+      this.#list = list;
+      if (list) {
+        this.#listHidden.write(list, this.#open ? null : "");
+        if (this.#open && previous === null && this.#activeId === null && this.hasTriggerTarget) {
+          this.#activateInitialOption();
+        }
+      }
     }
     if (this.hasTriggerTarget) {
-      this.#expanded.write(this.triggerTarget, list.hidden ? "false" : "true");
+      this.#expanded.write(this.triggerTarget, String(this.#open));
     }
-  }
-
-  /** Treats the listbox as closed when the list it opened is hidden. */
-  #adoptPageClose(): void {
-    if (this.#shownList?.hidden) this.#shownList = null;
   }
 
   /**
@@ -358,6 +371,7 @@ export class ListboxController extends Controller<HTMLElement> {
    * pass, and clears the typeahead timer.
    */
   override disconnect(): void {
+    this.#flushMutations();
     this.#connectionGeneration += 1;
     this.#reconcile.disconnect();
     this.#observer.disconnect();
@@ -387,8 +401,9 @@ export class ListboxController extends Controller<HTMLElement> {
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
     if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
+    this.#reconcileOpenState();
     if (!this.#isClosed) this.#reconcileActive();
-    const options = this.optionTargets;
+    const options = this.hasListTarget ? this.optionTargets : [];
     const length = options.length;
     const activeIndex = this.#findActiveIndex(options);
     if (this.#isClosed) {
@@ -473,15 +488,18 @@ export class ListboxController extends Controller<HTMLElement> {
 
   /** Opens the list and activates the selected option (else the first). */
   open(): void {
-    if (!this.hasListTarget) return;
-    this.#listHidden.write(this.listTarget, null);
-    this.#shownList = this.listTarget;
+    if (!this.hasTriggerTarget) return;
+    this.#list = this.hasListTarget ? this.listTarget : null;
+    this.#open = true;
     this.#expanded.write(this.triggerTarget, "true");
-    if (this.optionTargets.length === 0) {
-      // An empty listbox has nothing to activate; leave activedescendant cleared.
-      this.#setActive(-1);
-      return;
+    if (this.#list) {
+      this.#listHidden.write(this.#list, null);
+      this.#activateInitialOption();
     }
+  }
+
+  /** Activates the selected option, or the first when none is selected. */
+  #activateInitialOption(): void {
     const selected = this.optionTargets.findIndex(
       (option) => option.getAttribute("aria-selected") === "true",
     );
@@ -490,11 +508,13 @@ export class ListboxController extends Controller<HTMLElement> {
 
   /** Closes the list, clears the active option, and resets the typeahead buffer. */
   close(): void {
-    if (!this.hasListTarget) return;
-    this.#listHidden.write(this.listTarget, "");
-    this.#shownList = null;
-    this.#expanded.write(this.triggerTarget, "false");
-    this.#setActive(-1);
+    this.#list = this.hasListTarget ? this.listTarget : null;
+    this.#open = false;
+    if (this.#list) this.#listHidden.write(this.#list, "");
+    if (this.hasTriggerTarget) {
+      this.#expanded.write(this.triggerTarget, "false");
+      this.#setActive(-1);
+    }
     this.#typeahead.reset();
   }
 
@@ -534,6 +554,7 @@ export class ListboxController extends Controller<HTMLElement> {
    * report it their own way, and `connect()` only describes the state it finds.
    */
   #applySelection(option: HTMLElement | undefined): { value: string; fieldChanged: boolean } {
+    this.#flushMutations();
     for (const candidate of this.optionTargets) {
       this.#writeSelection(candidate, candidate === option ? "true" : "false");
     }
@@ -610,9 +631,21 @@ export class ListboxController extends Controller<HTMLElement> {
     return records.some((record) => options.has(record.target));
   }
 
+  /** Takes observed page selection writes, including a repeated owned value, as authored. */
+  #adoptOptionWrites(records: readonly MutationRecord[]): void {
+    for (const record of records) {
+      const option = record.target as HTMLElement;
+      if (record.attributeName === "aria-selected" && this.#managedOptions.has(option)) {
+        this.#selected.adopt(option);
+      }
+    }
+  }
+
   /** Expires own claims while keeping queued authored options changes observable. */
   #flushMutations(): void {
-    if (this.#concernsOptions(this.#observer.take())) this.#reconcile.schedule();
+    const records = this.#observer.take();
+    this.#adoptOptionWrites(records);
+    if (this.#concernsOptions(records)) this.#reconcile.schedule();
   }
 
   /**
@@ -652,6 +685,11 @@ export class ListboxController extends Controller<HTMLElement> {
   #reconcileActive(): void {
     if (!this.hasTriggerTarget || this.#isClosed) {
       if (this.hasTriggerTarget) this.#setActive(-1);
+      return;
+    }
+
+    if (!this.hasListTarget) {
+      this.#activeDescendant.write(this.triggerTarget, null);
       return;
     }
 
@@ -724,7 +762,7 @@ export class ListboxController extends Controller<HTMLElement> {
 
   /** Whether the list is currently hidden. */
   get #isClosed(): boolean {
-    return !this.hasListTarget || this.listTarget.hidden !== false;
+    return this.#list ? this.#list.hidden !== false : !this.#open;
   }
 
   /**
@@ -732,7 +770,8 @@ export class ListboxController extends Controller<HTMLElement> {
    * receives it.
    */
   #writeSelection(target: HTMLElement, value: string | null): void {
-    setAttributeIfChanged(target, "aria-selected", value, () => {
+    this.#managedOptions.add(target);
+    this.#selected.write(target, value, () => {
       this.#observer.claim(target, "aria-selected", value);
     });
   }

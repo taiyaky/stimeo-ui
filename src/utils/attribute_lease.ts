@@ -18,7 +18,7 @@ interface AttributeHold {
   readonly record: string;
   written: string | null;
   /** What it hands back with nothing beneath it: the author's value. */
-  readonly original: string | null;
+  original: string | null;
   /** Whether it hands back what the hold beneath it wrote last instead. */
   linked: boolean;
 }
@@ -227,15 +227,48 @@ export class AttributeLease<T extends Element = Element> {
     names.set(attribute, (names.get(attribute) ?? new Set<string>()).add(this.#record));
   }
 
-  /** Writes or removes the leased attribute while preserving its authored value. */
-  write(element: T, value: string | null): void {
+  /**
+   * Writes or removes the leased attribute while preserving its authored value.
+   * `beforeWrite` runs only before an actual change to that attribute.
+   */
+  write(element: T, value: string | null, beforeWrite?: () => void): void {
     const stack = attributeStack(element, this.#attribute);
     const hold = this.#take(stack) ?? this.#acquire(element, stack);
     this.#held.add(element);
     const shows = !this.#covered(element, stack, hold);
     hold.written = value;
     this.#mark(element, stack);
-    if (shows) this.#reflect(element, value);
+    if (shows) this.#reflect(element, value, beforeWrite);
+  }
+
+  /**
+   * Takes an observed page write as the author's value without rewriting the attribute.
+   *
+   * An observer may identify a page write even when it repeats this lease's value.
+   * With `ifChanged`, a disconnected consumer adopts only a value no hold carries.
+   * Linked holds above inherit the new authored value; this hold no longer returns
+   * to a hold beneath it. Returns false when no hold exists or `ifChanged` finds
+   * the value still carried by this hold or one above it.
+   */
+  adopt(element: T, options: { readonly ifChanged?: boolean } = {}): boolean {
+    const known = registry.stacks.get(element)?.has(this.#attribute);
+    if (!this.#held.has(element) && !known && !element.hasAttribute(this.#record)) return false;
+    const stack = attributeStack(element, this.#attribute);
+    const hold = this.#take(stack);
+    if (!hold) return false;
+    const current = element.getAttribute(this.#attribute);
+    if (options.ifChanged && (current === hold.written || this.#covered(element, stack, hold))) {
+      return false;
+    }
+    this.#held.add(element);
+    hold.original = current;
+    hold.linked = false;
+    for (const above of stack.slice(stack.indexOf(hold) + 1)) {
+      if (!above.linked) break;
+      above.original = current;
+    }
+    this.#mark(element, stack);
+    return true;
   }
 
   /**
@@ -329,7 +362,7 @@ export class AttributeLease<T extends Element = Element> {
   }
 
   /** Reflects only a real value transition, avoiding self-triggered mutation work. */
-  #reflect(element: T, value: string | null): void {
-    setAttributeIfChanged(element, this.#attribute, value);
+  #reflect(element: T, value: string | null, beforeWrite?: () => void): void {
+    setAttributeIfChanged(element, this.#attribute, value, beforeWrite);
   }
 }

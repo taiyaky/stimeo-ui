@@ -32,6 +32,10 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * primitive. This controller only owns *when* to open/close and the
  * dialog-specific backdrop click.
  *
+ * Open/closed intent survives a temporary absence of the dialog target. A successor
+ * receives that intent without releasing the trap, changing its modal stack position,
+ * or forgetting the opener. Initial markup with no dialog target opens nothing.
+ *
  * Each move of the open state is reported: `stimeo--dialog:open` and
  * `stimeo--dialog:close` dispatch `{ reason: StateReason }`, after the dialog's
  * `hidden` attribute is written and before focus moves. Both are informational,
@@ -62,6 +66,10 @@ export class DialogController extends Controller<HTMLElement> {
   #reporting = false;
   /** Whether dialog churn is applied: set by `connect()`, cleared first thing in `disconnect()`. */
   #connected = false;
+  /** The logical open state, including while the dialog target is temporarily absent. */
+  #openState = false;
+  /** Whether this connection has had a dialog target; initial missing markup opens nothing. */
+  #seenDialog = false;
   /** The dialog the open state was last applied to. */
   #dialog: HTMLElement | null = null;
   /** Borrows `hidden` on each dialog, to give back when one stops being the target. */
@@ -75,6 +83,8 @@ export class DialogController extends Controller<HTMLElement> {
     this.#connected = true;
     if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, "");
     this.#dialog = this.hasDialogTarget ? this.dialogTarget : null;
+    this.#seenDialog = this.#dialog !== null;
+    this.#openState = false;
     this.#reporting = true;
     this.#morphRender.observe(this.element);
   }
@@ -88,13 +98,14 @@ export class DialogController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#morphRender.disconnect();
     this.#connected = false;
+    this.#openState = false;
     this.#reporting = false;
     this.#trap.disconnect(this);
   }
 
-  /** Shows the dialog while its trap is active and hides it otherwise. */
+  /** Shows the dialog while the connection holds an open intent and hides it otherwise. */
   #repair(): void {
-    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, this.#trap.active ? null : "");
+    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, this.#openState ? null : "");
   }
 
   /** Applies the open state to a dialog that arrives after connect in front of the others. */
@@ -125,25 +136,34 @@ export class DialogController extends Controller<HTMLElement> {
 
   /** Closes when the backdrop (the dialog target itself) is clicked. */
   closeOnBackdrop(event: MouseEvent): void {
-    if (event.target === this.dialogTarget) this.#close("outside");
+    if (this.hasDialogTarget && event.target === this.dialogTarget) this.#close("outside");
   }
 
   /** Reveals the dialog, reports a move, then traps focus and locks scroll. */
   #open(reason: StateReason): void {
-    if (!this.hasDialogTarget || this.#isOpen) return;
-    this.#hidden.write(this.dialogTarget, null);
+    this.#adoptDialog();
+    if (!this.#connected || !this.#seenDialog || this.#isOpen) return;
+    this.#openState = true;
+    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, null);
     if (this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
     // A subscriber may close it again from the handler above. Everything below
     // applies to an element that is open; run it against a closed one and the
     // side effects have no path back — the later `close()` returns early.
-    if (!this.#isOpen) return;
+    if (!this.#isOpen || !this.#connected) return;
+    this.#adoptDialog();
+    if (this.hasDialogTarget && this.dialogTarget.hidden) {
+      this.#openState = false;
+      return;
+    }
     this.#trap.activate();
   }
 
   /** Hides the dialog, reports a move, then restores scroll and focus. */
   #close(reason: StateReason): void {
-    if (!this.hasDialogTarget || !this.#isOpen) return;
-    this.#hidden.write(this.dialogTarget, "");
+    this.#adoptDialog();
+    if (!this.#isOpen) return;
+    this.#openState = false;
+    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, "");
     if (this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
     // A subscriber may reopen it from the handler above, in which case the trap it
     // just activated is the live one — tearing it down here would strip the modal
@@ -156,26 +176,27 @@ export class DialogController extends Controller<HTMLElement> {
    * Applies the open state to the dialog that is now first, when that dialog changed. An
    * open dialog moves its modal trap onto it, keeping the trap's place among the page's modals
    * and the opener focus returns to; focus moves inside unless it is already there or a modal
-   * opened over this one takes `Tab`. An open dialog left with no dialog closes. Both are silent.
+   * opened over this one takes `Tab`. A temporary absence keeps the open intent, modal stack position, opener and scroll lock.
+   * The current target is resolved before each action; handoff itself stays silent.
    */
   #adoptDialog(): void {
     const dialog = this.hasDialogTarget ? this.dialogTarget : null;
-    if (dialog === this.#dialog) return;
+    const previous = this.#dialog;
+    if (dialog === previous) return;
+    if (previous) {
+      if (this.dialogTargets.includes(previous)) this.#hidden.write(previous, "");
+      else this.#hidden.return(previous);
+    }
     this.#dialog = dialog;
-    if (!this.#trap.active) {
-      if (dialog) this.#hidden.write(dialog, "");
-      return;
+    if (dialog) {
+      this.#seenDialog = true;
+      this.#hidden.write(dialog, this.#openState ? null : "");
     }
-    if (!dialog) {
-      this.#trap.deactivate();
-      return;
-    }
-    this.#hidden.write(dialog, null);
-    this.#trap.refreshContainer();
+    if (this.#openState) this.#trap.refreshContainer();
   }
 
-  /** Whether the dialog is currently visible. */
+  /** Whether this connection holds an open intent, even without a dialog target. */
   get #isOpen(): boolean {
-    return this.hasDialogTarget && !this.dialogTarget.hidden;
+    return this.#openState;
   }
 }

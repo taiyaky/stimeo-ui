@@ -116,7 +116,7 @@ describe("MinDurationFloor", () => {
     expect(finish).not.toHaveBeenCalled();
   });
 
-  it("treats a floor that never began as fully elapsed", () => {
+  it("runs a zero-duration finish without begin", () => {
     const finish = vi.fn();
     floor.schedule(0, finish);
     expect(finish).toHaveBeenCalledTimes(1);

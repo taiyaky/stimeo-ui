@@ -1175,10 +1175,8 @@ describe("SpinnerController accessibility", () => {
     await start();
     instance().start();
     const spoken = await captureSpeech({ container: indicator(), steps: 1 });
-    // Freeze the whole ordered array (not a name-only `toContain`): the transition is
-    // read out by the shared announcer, so an indicator that also carried `status`
-    // would say it twice. A generic container yields its own text and then the
-    // message span's; what matters is that no live-region role is spoken.
+    // The visible indicator produces text without a live-region role in the virtual
+    // reader output.
     expect(spoken).toEqual(["Loading…", "Loading…"]);
   });
 });

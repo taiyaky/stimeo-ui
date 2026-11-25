@@ -405,6 +405,15 @@ describe("BreadcrumbController", () => {
       expect(ellipsis().hidden).toBe(true);
       expect(removed).toHaveBeenCalledWith("blur", onBlur);
     });
+
+    it("stops waiting for blur when the ellipsis loses its marker", async () => {
+      const { onBlur, removed } = await deferEllipsisHide();
+
+      ellipsis().removeAttribute("data-stimeo--breadcrumb-target");
+      await tick();
+
+      expect(removed).toHaveBeenCalledWith("blur", onBlur);
+    });
   });
 
   describe("reconnect / Turbo cache restore", () => {
@@ -541,6 +550,37 @@ describe("BreadcrumbController", () => {
       expect(hiddenStates()).toEqual([false, false]);
       expect(ellipsis().hidden).toBe(true);
     });
+
+    it.each([false, true])(
+      "settles a replacement trigger after a gap with toggle=%s",
+      async (toggleWhileMissing) => {
+        await start(markup, { scrollWidth: 500, clientWidth: 100 });
+        const disclosure = trigger();
+        const replacement = disclosure.cloneNode(true) as HTMLElement;
+        disclosure.click();
+        const controller = application.getControllerForElementAndIdentifier(
+          root(),
+          "stimeo--breadcrumb",
+        ) as BreadcrumbController;
+        const events: boolean[] = [];
+        root().addEventListener("stimeo--breadcrumb:toggle", (event) => {
+          events.push((event as CustomEvent<{ expanded: boolean }>).detail.expanded);
+        });
+
+        disclosure.remove();
+        await tick();
+        expect(hiddenStates()).toEqual([false, false]);
+        expect(ellipsis().hidden).toBe(true);
+        if (toggleWhileMissing) controller.toggle();
+
+        ellipsis().append(replacement);
+        await tick();
+        expect(replacement.getAttribute("aria-expanded")).toBe(String(!toggleWhileMissing));
+        expect(hiddenStates()).toEqual([toggleWhileMissing, toggleWhileMissing]);
+        expect(ellipsis().hidden).toBe(false);
+        expect(events).toEqual(toggleWhileMissing ? [false] : []);
+      },
+    );
 
     it("collapses once a late-arriving trigger completes the disclosure", async () => {
       // The mirror case: markup that starts incomplete must pick up the normal
@@ -683,6 +723,77 @@ describe("BreadcrumbController", () => {
       expect(hiddenStates()).toEqual([true]); // the remaining target still collapses
     });
 
+    it("returns disclosure attributes when the controller identifier is removed", async () => {
+      const trail = markup
+        .replace('aria-expanded="false"', 'aria-expanded="true"')
+        .replace('id="bc-a"', 'id="bc-a" hidden="until-found"');
+      await start(trail, { scrollWidth: 500, clientWidth: 100 });
+      const disclosure = trigger();
+      disclosure.click();
+      expect(hiddenStates()).toEqual([true, true]);
+      expect(ellipsis().hidden).toBe(false);
+      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(collapsibles().map((item) => item.getAttribute("hidden"))).toEqual([
+        "until-found",
+        null,
+      ]);
+      expect(ellipsis().hidden).toBe(true);
+      expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("keeps a page-authored visibility change when an item loses its marker", async () => {
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      const [item] = collapsibles() as [HTMLElement];
+      expect(item.getAttribute("hidden")).toBe("");
+
+      item.setAttribute("hidden", "until-found");
+      item.removeAttribute("data-stimeo--breadcrumb-target");
+      await tick();
+
+      expect(item.getAttribute("hidden")).toBe("until-found");
+    });
+
+    it("keeps holding visibility when a collapsible item moves within the trail", async () => {
+      await start(markup.replace('id="bc-a"', 'id="bc-a" hidden="until-found"'), {
+        scrollWidth: 500,
+        clientWidth: 100,
+      });
+      const [item] = collapsibles() as [HTMLElement];
+      const writes: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => writes.push(...records));
+      observer.observe(item, {
+        attributes: true,
+        attributeFilter: ["hidden"],
+        attributeOldValue: true,
+      });
+
+      list().append(item);
+      await tick();
+      observer.disconnect();
+
+      expect(item.getAttribute("hidden")).toBe("");
+      expect(writes.map((write) => write.oldValue)).not.toContain("until-found");
+    });
+
+    it("preserves the expanded trail when its root is detached and reinserted", async () => {
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      const host = root();
+      const disclosure = trigger();
+      disclosure.click();
+      host.remove();
+      await tick();
+      expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+
+      document.body.append(host);
+      await tick();
+      expect(hiddenStates()).toEqual([false, false]);
+      expect(ellipsis().hidden).toBe(false);
+    });
+
     it("re-measures after the last collapsible target leaves", async () => {
       // One collapsible only: once its marker is gone there is nothing left to collapse,
       // so the disclosure must retire. Reaching that state *requires* re-measuring —
@@ -729,6 +840,17 @@ describe("BreadcrumbController", () => {
       expect(first.hidden).toBe(false);
       expect(hiddenStates()).toEqual([true]); // the surviving target stays collapsed
       expect(ellipsis().hidden).toBe(false);
+    });
+
+    it("excludes the ellipsis from the width of the full trail", async () => {
+      await start(markup, undefined, (element) => stubLiveGeometry(element, 350));
+      expect(ellipsis().hidden).toBe(false);
+
+      stubLiveGeometry(list(), 400);
+      window.dispatchEvent(new Event("resize"));
+
+      expect(hiddenStates()).toEqual([false, false]);
+      expect(ellipsis().hidden).toBe(true);
     });
 
     it("leaves a former collapsible item visible through later collapses", async () => {

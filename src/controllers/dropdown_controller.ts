@@ -35,9 +35,9 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * - A click outside the controller element closes the menu.
  * - A trigger or a menu that takes over — in one task, or after an earlier one leaves
  *   in a later task — carries the open state, and an `aria-controls` this controller
- *   supplied names the menu that is first. With no menu left the dropdown reads
- *   closed and leaves the Escape stack. One that stops resolving as the target gets
- *   back what it carried before this controller wrote on it.
+ *   supplied names the menu that is first. An action applies the retained state to
+ *   the new first menu before acting. With no menu, the state and Escape dismissal
+ *   remain available. Departing targets get their authored attributes back.
  * - A Turbo morph that keeps the elements drops the attributes the server did not
  *   send — the menu's `hidden`, the trigger's `aria-expanded` and the
  *   `aria-controls` this controller supplied. They are written back from the open
@@ -97,8 +97,8 @@ export class DropdownController extends Controller<HTMLElement> {
 
   /** Starts in the closed state and registers outside-click handling. */
   override connect(): void {
-    this.#associateTriggerWithMenu();
-    this.#close("api");
+    this.#menu = this.hasMenuTarget ? this.menuTarget : null;
+    this.#setOpen(false, "api");
     this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
     this.#morphRender.observe(this.element);
     this.#connected = true;
@@ -116,7 +116,7 @@ export class DropdownController extends Controller<HTMLElement> {
 
   /** Brings a trigger that arrives after connect to the open state and names the menu from it. */
   triggerTargetConnected(): void {
-    if (this.#connected) this.#reflectTrigger();
+    this.#adoptMenu();
   }
 
   /**
@@ -129,12 +129,12 @@ export class DropdownController extends Controller<HTMLElement> {
       this.#expanded.return(trigger);
       this.#withdrawControls(trigger);
     }
-    if (this.#connected) this.#reflectTrigger();
+    this.#adoptMenu();
   }
 
   /** Applies the open state to a menu that arrives after connect in front of the others. */
   menuTargetConnected(): void {
-    this.#adoptMenu();
+    this.#adoptMenu(true);
   }
 
   /**
@@ -144,22 +144,20 @@ export class DropdownController extends Controller<HTMLElement> {
    * while it still carries it.
    */
   menuTargetDisconnected(menu: HTMLElement): void {
-    this.#adoptMenu();
+    this.#adoptMenu(true);
     if (!this.menuTargets.includes(menu)) this.#menuHidden.return(menu);
   }
 
   /** Toggles the menu between open and closed. Bound via `data-action`. */
   toggle(event?: Event): void {
-    if (this.#isOpen) {
-      this.close(event);
-    } else {
-      this.open(event);
-    }
+    this.#adoptMenu(true);
+    this.#setOpen(!this.#openState, stateReasonFor(event));
   }
 
   /** Reveals the menu and reflects the open state on the trigger. */
   open(event?: Event): void {
-    this.#open(stateReasonFor(event));
+    this.#adoptMenu(true);
+    this.#setOpen(true, stateReasonFor(event));
   }
 
   /** Hides the menu and reflects the closed state on the trigger. */
@@ -167,60 +165,54 @@ export class DropdownController extends Controller<HTMLElement> {
     this.#close(stateReasonFor(event));
   }
 
-  /** Reveals the menu, reflects the open state, and reports a move. */
-  #open(reason: StateReason): void {
-    if (!this.hasMenuTarget) return;
-    const menu = this.menuTarget;
-    const was = this.#isOpen;
-    this.#escapeLayer.activate(document, {
-      onDismiss: () => this.#closeAndRestore(),
-      claims: claimsWhileFocusWithin(this.element),
-    });
-    this.#menuHidden.write(menu, null);
-    this.#menu = menu;
-    this.#openState = true;
-    if (this.hasTriggerTarget) this.#expanded.write(this.triggerTarget, "true");
-    if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
-  }
-
   /** Hides the menu, reflects the closed state, and reports a move. */
   #close(reason: StateReason): void {
-    const was = this.#isOpen;
-    this.#escapeLayer.deactivate();
-    this.#openState = false;
-    const menu = this.hasMenuTarget ? this.menuTarget : null;
-    this.#menu = menu;
-    if (!menu) return;
-    this.#menuHidden.write(menu, "");
-    if (this.hasTriggerTarget) this.#expanded.write(this.triggerTarget, "false");
-    if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
+    this.#adoptMenu(true);
+    this.#setOpen(false, reason);
+  }
+
+  /** Reflects the open state and reports a move even while the menu is absent. */
+  #setOpen(open: boolean, reason: StateReason): void {
+    const changed = open !== this.#openState;
+    this.#openState = open;
+    if (open) {
+      this.#escapeLayer.activate(document, {
+        onDismiss: () => this.#closeAndRestore(),
+        claims: claimsWhileFocusWithin(this.element),
+      });
+    } else {
+      this.#escapeLayer.deactivate();
+    }
+    if (this.#menu) this.#menuHidden.write(this.#menu, open ? null : "");
+    this.#reflectTrigger();
+    if (!changed || !this.#reporting) return;
+    if (open) this.dispatch("open", { detail: { reason }, cancelable: false });
+    else this.dispatch("close", { detail: { reason }, cancelable: false });
   }
 
   /**
-   * Moves the open state onto the menu that is now first, when that menu changed: one that took
-   * over carries the state of the menu before it, and one that arrives with none before it
-   * arrives closed. With none left, the dropdown leaves the Escape stack. The trigger then reads
-   * the menu, changed or not. Nothing is dispatched.
+   * Moves the last menu's visibility onto its successor before an action or observer callback.
+   * A missing menu leaves the logical state and Escape layer intact.
    */
-  #adoptMenu(): void {
+  #adoptMenu(readCurrent = false): void {
     if (!this.#connected) return;
     const menu = this.hasMenuTarget ? this.menuTarget : null;
     const previous = this.#menu;
+    if (previous && (readCurrent || menu !== previous)) this.#openState = !previous.hidden;
+    if (!this.#openState) this.#escapeLayer.deactivate();
     this.#menu = menu;
-    if (!menu) {
-      this.#escapeLayer.deactivate();
-      this.#openState = false;
-    } else if (menu !== previous) {
-      this.#menuHidden.write(menu, (previous?.hidden ?? true) ? "" : null);
-    }
+    if (menu && menu !== previous) this.#menuHidden.write(menu, this.#openState ? null : "");
     this.#reflectTrigger();
   }
 
   /** Writes the open state onto the trigger that is first and names the menu from it. */
   #reflectTrigger(): void {
     if (!this.hasTriggerTarget) return;
-    this.#expanded.write(this.triggerTarget, String(this.#isOpen));
-    this.#associateTriggerWithMenu();
+    const trigger = this.triggerTarget;
+    const expanded = this.#menu ? !this.#menu.hidden : this.#openState;
+    this.#expanded.write(trigger, String(expanded));
+    if (this.hasMenuTarget) this.#associateTriggerWithMenu();
+    else this.#withdrawControls(trigger);
   }
 
   /** Writes the open state back onto the menu and the trigger, without reporting. */
@@ -234,11 +226,6 @@ export class DropdownController extends Controller<HTMLElement> {
   #closeAndRestore(): void {
     this.#close("escape");
     if (this.hasTriggerTarget) this.triggerTarget.focus();
-  }
-
-  /** Whether the menu is currently visible. */
-  get #isOpen(): boolean {
-    return this.hasMenuTarget && !this.menuTarget.hidden;
   }
 
   /**

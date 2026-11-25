@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
+import { AttributeLease } from "../utils/attribute_lease";
 import { validSelector } from "../utils/declared_value";
 import { FrameCoalescer } from "../utils/frame_coalescer";
 import { IntersectionWatcher } from "../utils/intersection_watcher";
@@ -113,6 +114,8 @@ export class ScrollspyController extends Controller<HTMLElement> {
 
   /** Shared IO plumbing (support guard, active guard, teardown). */
   readonly #watcher = new IntersectionWatcher((entries) => this.#onIntersection(entries));
+  /** The active location borrows the link's authored current-state attribute. */
+  readonly #current = new AttributeLease<HTMLElement>("aria-current", this.identifier);
   #isConnected = false;
 
   /**
@@ -207,7 +210,8 @@ export class ScrollspyController extends Controller<HTMLElement> {
     if (this.#isConnected) this.#scheduleResync();
   }
 
-  linkTargetDisconnected(): void {
+  linkTargetDisconnected(link: HTMLElement): void {
+    if (!this.linkTargets.includes(link)) this.#current.return(link);
     if (this.#isConnected) this.#scheduleResync();
   }
 
@@ -545,11 +549,11 @@ export class ScrollspyController extends Controller<HTMLElement> {
 
     for (const link of this.linkTargets) {
       if (activeLinks.includes(link)) {
-        link.setAttribute("aria-current", "location");
+        this.#current.write(link, "location");
       } else if (link.getAttribute("aria-current") === "location") {
         // Reclaim only the value this controller publishes, so an author-owned
         // `aria-current="page"` on a table-of-contents link survives.
-        link.removeAttribute("aria-current");
+        this.#current.write(link, null);
       }
     }
 

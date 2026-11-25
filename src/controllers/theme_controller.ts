@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { hasModifierChord, isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { validSelector } from "../utils/declared_value";
 import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
@@ -119,8 +120,14 @@ export class ThemeController extends Controller<HTMLElement> {
   /** The storage key last read, so a `storageKey` callback naming it again reads nothing. */
   #storageKeyRead: string | null = null;
 
+  /** Returns option semantics to the author when an option leaves this group. */
+  readonly #checked = new AttributeLease<HTMLElement>("aria-checked", this.identifier);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
   /** Owns the single Tab stop across the option set (APG radiogroup). */
-  readonly #roving = new RovingTabindex(() => this.optionTargets);
+  readonly #roving = new RovingTabindex(
+    () => this.optionTargets,
+    (option, tabindex) => this.#tabindex.write(option, String(tabindex)),
+  );
 
   /**
    * The pair on screen as last reported or re-seeded, so a move can be told from a
@@ -266,7 +273,11 @@ export class ThemeController extends Controller<HTMLElement> {
   }
 
   /** Re-derives them again when an option leaves, so a Tab stop always remains. */
-  optionTargetDisconnected(): void {
+  optionTargetDisconnected(option: HTMLElement): void {
+    if (!this.optionTargets.includes(option)) {
+      this.#checked.return(option);
+      this.#tabindex.return(option);
+    }
     if (this.#connected) this.#morph.schedule();
   }
 
@@ -374,7 +385,7 @@ export class ThemeController extends Controller<HTMLElement> {
       let selected = -1;
       options.forEach((option, index) => {
         const isSelected = this.#optionMode(option) === mode;
-        option.setAttribute("aria-checked", String(isSelected));
+        this.#checked.write(option, String(isSelected));
         if (isSelected && selected === -1) selected = index;
       });
       // APG: a radiogroup with no selection keeps its first radio tabbable.

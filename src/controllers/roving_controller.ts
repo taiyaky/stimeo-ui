@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { ownerIndex } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { ListenerSet } from "../utils/listener_set";
@@ -57,7 +58,10 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * follows DOM focus first, so an item added and focused in the same task keeps it;
  * `connect()` deliberately does not, because the authored DOM is what it reads
  * back. The delegated listeners and the state observer are torn down on
- * `disconnect()`.
+ * `disconnect()`. `tabindex` is borrowed until an item loses its target role or
+ * the controller identifier. Its authored value is then returned unless the page
+ * wrote a different value meanwhile. In-scope moves and whole-root detach keep
+ * the current stop; ownership records carry the authored value across cache copies.
  */
 export class RovingController extends Controller<HTMLElement> {
   static override targets = ["item"];
@@ -73,7 +77,12 @@ export class RovingController extends Controller<HTMLElement> {
   declare wrapValue: boolean;
   declare homeEndValue: boolean;
 
-  readonly #roving = new RovingTabindex(() => this.itemTargets);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #managedItems = new WeakSet<HTMLElement>();
+  readonly #roving = new RovingTabindex(
+    () => this.itemTargets,
+    (item, value) => this.#writeTabindex(item, value),
+  );
   readonly #reconcile = new MorphRenderWatcher(() => this.#ensureTabStop(true));
   #connected = false;
   #observer: MutationObserver | null = null;
@@ -103,14 +112,24 @@ export class RovingController extends Controller<HTMLElement> {
 
   /** Drops a runtime-added item from the Tab sequence before batch reconciliation. */
   itemTargetConnected(item: HTMLElement): void {
-    if (!this.#connected) return;
-    item.tabIndex = -1;
+    if (!this.#connected || this.#managedItems.has(item)) return;
+    this.#writeTabindex(item, -1);
     this.#reconcile.schedule();
   }
 
-  /** Re-establishes the single Tab stop after an item leaves the target set. */
-  itemTargetDisconnected(): void {
+  /** Returns a departed item's tabindex and re-establishes the surviving Tab stop. */
+  itemTargetDisconnected(item: HTMLElement): void {
+    if (!this.scope.containsElement(item) || !this.itemTargets.includes(item)) {
+      this.#managedItems.delete(item);
+      this.#tabindex.return(item);
+    }
     this.#reconcile.schedule();
+  }
+
+  /** Records controlled targets so an in-scope move does not initialize them again. */
+  #writeTabindex(item: HTMLElement, value: 0 | -1): void {
+    this.#managedItems.add(item);
+    this.#tabindex.write(item, String(value));
   }
 
   /** Arrow keys move focus + the tab stop; Home/End jump to the ends. */

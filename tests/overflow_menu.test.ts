@@ -211,6 +211,26 @@ describe("OverflowMenuController", () => {
     expect(menu().hidden).toBe(true);
   });
 
+  it("reserves the width of the More button when a shrink makes it necessary", async () => {
+    setup(MARKUP());
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    const wrapper = more();
+    const button = trigger();
+    Object.defineProperty(button, "offsetWidth", {
+      configurable: true,
+      get: () => (wrapper.hidden ? 0 : 50),
+    });
+    expect(button.offsetWidth).toBe(0);
+
+    stub(root(), "clientWidth", 230);
+    instance().update();
+
+    expect(button.offsetWidth).toBe(50);
+    expect(ids(items())).toEqual(["a"]);
+    expect(ids(menu())).toEqual(["b", "c"]);
+  });
+
   it("falls back to insertion when moveBefore refuses a managed item", async () => {
     setup(MARKUP());
     setGeom(1000, { a: 100, b: 100, c: 100 });

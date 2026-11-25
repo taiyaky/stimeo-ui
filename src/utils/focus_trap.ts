@@ -4,10 +4,12 @@ import {
   canTakeFocus,
   closestInFlatTree,
   deepActiveElement,
+  elementHoldingPosition,
   flatTreeChildren,
   flatTreeContains,
   flatTreeParent,
   isRenderedForFocus,
+  isTabStop,
   sequentialTabStops,
   type TabStopElement,
 } from "./focus_candidate";
@@ -36,8 +38,14 @@ import { TabindexLoan } from "./tabindex_loan";
  * skips buttons and links by default). The order is HTML's sequential navigation order
  * within the container, as {@link sequentialTabStops} computes it: positive `tabindex`
  * first, ascending, then the rest in tree order; a radio group stops once; open shadow
- * roots are walked in flat-tree order. Focus found outside the container enters at the
- * first stop on `Tab` and at the last on `Shift+Tab`. `Alt+Tab` (Safari's key for
+ * roots are walked in flat-tree order. A move starts where the engine's sequential focus
+ * navigation starting point would: at the stop holding focus; at the position a pointer
+ * press hit when nothing holds focus, or when the element holding focus is not a stop and
+ * holds that position (a container or region with `tabindex="-1"` the press focused); and,
+ * once focus is lost (`<body>`), at the place of the last element that took focus, even after
+ * it leaves or is hidden. From a position the move goes to the nearest stop after it, or
+ * before it on `Shift+Tab`. Focus found outside the container, with no such position inside
+ * it, enters at the first stop on `Tab` and at the last on `Shift+Tab`. `Alt+Tab` (Safari's key for
  * moving to every control) is handled like `Tab`; `Ctrl+Tab`, `Meta+Tab`, a key that is
  * part of an IME composition, and a `Tab` an inner handler already consumed are left
  * alone. A move into a text input selects its text, as the engine's own `Tab` does.
@@ -208,19 +216,32 @@ interface TrapEntry {
   openedFrom: TrapEntry | null;
   /** The way back handed over by traps released before it. */
   handedBack: HTMLElement[];
+  /** Return targets for an unavailable container, when the shared entry provides them. */
+  readonly returnTargets?: () => Iterable<HTMLElement>;
 }
 
 /**
  * A document's active traps, most recently activated last, its one `Tab` listener, its one
- * morph listener, the background elements the traps have made `inert`, and the active traps
- * that lock scroll.
+ * morph listener, its pointer and focus listeners, the background elements the traps have
+ * made `inert`, the active traps that lock scroll, and where a move without a focused element
+ * starts.
  */
 interface TrapRegistry {
   readonly stack: TrapEntry[];
   readonly onKeydown: (event: KeyboardEvent) => void;
   readonly onMorph: () => void;
+  readonly onPointerDown: (event: PointerEvent) => void;
+  readonly onFocusIn: (event: FocusEvent) => void;
   readonly inerted: Set<HTMLElement>;
   readonly scrollLocks: Set<TrapEntry>;
+  /**
+   * The sequential focus navigation starting point while traps are active: the position the
+   * last pointer press hit, or the last element that took focus, as a live range that keeps
+   * its place when what it marks leaves.
+   */
+  start: Range | null;
+  /** Whether `start` is a pointer press that no element has taken focus from yet. */
+  pressed: boolean;
 }
 
 /**
@@ -231,7 +252,7 @@ interface TrapRegistry {
 export class FocusTrap {
   /** Each document's trap registry; a WeakMap keeps documents collectible. */
   static readonly #registries = sharedRegistry(
-    "stimeo-ui.focus-trap.registry.v2",
+    "stimeo-ui.focus-trap.registry.v3",
     () => new WeakMap<Document, TrapRegistry>(),
   );
   /** Input types whose text a move into the field selects. */
@@ -279,7 +300,7 @@ export class FocusTrap {
 
   /** Gives each activation its own identity and way-back links in the shared registry. */
   #createEntry(): TrapEntry {
-    return {
+    const entry: TrapEntry = {
       container: () => this.#readContainer(),
       moveFocus: (backward) => this.#moveFocus(backward),
       refocus: () => this.#refocus(),
@@ -287,7 +308,9 @@ export class FocusTrap {
       lockedBody: null,
       openedFrom: null,
       handedBack: [],
+      returnTargets: () => this.#activeReturnTargets(entry),
     };
+    return entry;
   }
 
   /** Whether the trap is currently active. */
@@ -335,6 +358,7 @@ export class FocusTrap {
       return;
     }
     const entry = this.#entry;
+    const parent = entry.openedFrom;
     const openers = this.#openers;
     this.#openers = [];
     this.#activeState = false;
@@ -344,7 +368,7 @@ export class FocusTrap {
     FocusTrap.#reconcileBackground(document);
     try {
       const wayBack = this.#handOver(entry, openers, above);
-      if (restoreFocus) this.#restore(wayBack, above);
+      if (restoreFocus) this.#restore(wayBack, above, parent);
     } finally {
       this.#returnTabindexes();
     }
@@ -427,8 +451,8 @@ export class FocusTrap {
   }
 
   /**
-   * Puts this trap on top of the document's stack; the first trap installs the `Tab` listener
-   * and the morph listener.
+   * Puts this trap on top of the document's stack; the first trap installs the `Tab` listener,
+   * the morph listener and the listeners that track the starting point.
    */
   #joinStack(): void {
     const registry = FocusTrap.#registry(document);
@@ -436,13 +460,18 @@ export class FocusTrap {
       document.addEventListener("keydown", registry.onKeydown);
       document.addEventListener("turbo:morph", registry.onMorph);
       document.addEventListener("turbo:morph-element", registry.onMorph);
+      document.addEventListener("pointerdown", registry.onPointerDown, {
+        capture: true,
+        passive: true,
+      });
+      document.addEventListener("focusin", registry.onFocusIn, { capture: true });
     }
     registry.stack.push(this.#entry);
   }
 
   /**
    * Takes this trap off the document's stack and returns the traps activated after it; the last
-   * trap removes the `Tab` listener and the morph listener. A pass a morph scheduled before
+   * trap removes the listeners and forgets the starting point. A pass a morph scheduled before
    * then finds no trap and changes nothing.
    */
   #leaveStack(entry: TrapEntry): TrapEntry[] {
@@ -454,6 +483,10 @@ export class FocusTrap {
       document.removeEventListener("keydown", registry.onKeydown);
       document.removeEventListener("turbo:morph", registry.onMorph);
       document.removeEventListener("turbo:morph-element", registry.onMorph);
+      document.removeEventListener("pointerdown", registry.onPointerDown, { capture: true });
+      document.removeEventListener("focusin", registry.onFocusIn, { capture: true });
+      registry.start = null;
+      registry.pressed = false;
     }
     return above;
   }
@@ -519,11 +552,12 @@ export class FocusTrap {
    * Moves focus back after a release, unless focus sits in a trap of `above` that takes `Tab`
    * (focus inside this trap's own container counts only for a trap nested inside it): to the
    * first element of `wayBack` that is connected, can take focus and is rendered, and that
-   * `focus()` moves focus to (or that a focus listener sends elsewhere); with none, where
-   * activation sends it in the trap that takes `Tab` now, unless that trap's `autoFocus` is off
-   * or focus is already inside it. A focus listener that activates this trap again ends it.
+   * `focus()` moves focus to (or that a focus listener sends elsewhere). If an opener belonged
+   * to a trap whose container is unavailable, its return targets can supply a destination.
+   * With none, gives focus to the trap that takes `Tab` now unless its `autoFocus` is off or
+   * focus is already inside it. A focus listener that activates this trap again ends it.
    */
-  #restore(wayBack: HTMLElement[], above: TrapEntry[]): void {
+  #restore(wayBack: HTMLElement[], above: TrapEntry[], parent: TrapEntry | null): void {
     const active = deepActiveElement(document);
     const released = this.#readContainer();
     const holds = (trap: TrapEntry): boolean => {
@@ -536,7 +570,7 @@ export class FocusTrap {
       );
     };
     if (above.some(holds)) return;
-    for (const element of wayBack) {
+    for (const element of FocusTrap.#returnCandidates(wayBack, parent)) {
       if (this.#activeState) return;
       if (!element.isConnected || !canTakeFocus(element) || !isRenderedForFocus(element)) continue;
       const before = deepActiveElement(document);
@@ -545,6 +579,26 @@ export class FocusTrap {
       if (after === element || after !== before) return;
     }
     FocusTrap.#tabOwner(FocusTrap.#registry(document).stack)?.refocus();
+  }
+
+  /** Yields the opener path of this activation without consuming or transferring it. */
+  *#activeReturnTargets(entry: TrapEntry): Iterable<HTMLElement> {
+    if (!this.#activeState || this.#entry !== entry) return;
+    yield* this.#openers;
+    const fallback = this.#options.fallbackFocus?.();
+    if (fallback) yield fallback;
+    yield* entry.handedBack;
+  }
+
+  /** Falls back through still-active traps that have no available focus container. */
+  static *#returnCandidates(
+    wayBack: HTMLElement[],
+    parent: TrapEntry | null,
+  ): Iterable<HTMLElement> {
+    yield* wayBack;
+    for (let entry = parent; entry && !FocusTrap.#takesTab(entry); entry = entry.openedFrom) {
+      yield* entry.returnTargets?.() ?? [];
+    }
   }
 
   /** Focuses where activation does, unless `autoFocus` is off or focus is already inside. */
@@ -571,8 +625,9 @@ export class FocusTrap {
     const focused = deepActiveElement(document);
     for (const [element, loan] of [...this.#tabindexLoans]) {
       if (element === focused) continue;
-      loan.returnAll();
+      // A tabindex removal can synchronously reactivate the trap and lend a fresh loan.
       this.#tabindexLoans.delete(element);
+      loan.returnAll();
     }
   }
 
@@ -641,8 +696,12 @@ export class FocusTrap {
       stack: [],
       onKeydown: (event) => FocusTrap.#resolveTab(registry.stack, event),
       onMorph: () => morphs.schedule(),
+      onPointerDown: (event) => FocusTrap.#recordPress(registry, event),
+      onFocusIn: (event) => FocusTrap.#recordFocus(registry, event),
       inerted: new Set(),
       scrollLocks: new Set(),
+      start: null,
+      pressed: false,
     };
     FocusTrap.#registries.set(ownerDocument, registry);
     return registry;
@@ -797,8 +856,8 @@ export class FocusTrap {
   }
 
   /**
-   * Focuses the next stop from where focus is (the previous one when `backward`),
-   * wrapping at the ends. The stops are checked before focusing, and a `focus()` that
+   * Focuses the next stop from where the move starts (the previous one when `backward`),
+   * wrapping at the ends; {@link FocusTrap.#start} says where that is. The stops are checked before focusing, and a `focus()` that
    * still leaves focus where it was (an engine without `checkVisibility` cannot see a
    * stop hidden by CSS) moves on to the following stop, each stop tried at most once.
    * Focus and blur listeners run inside `focus()` and can release this trap or activate
@@ -806,7 +865,7 @@ export class FocusTrap {
    * listener that sends focus elsewhere is left to do so.
    */
   #moveFocus(backward: boolean): void {
-    const from = deepActiveElement(document);
+    const from = FocusTrap.#start();
     for (const stop of sequentialTabStops(this.#getContainer(), from, backward)) {
       if (!this.#ownsTab()) return;
       const before = deepActiveElement(document);
@@ -818,6 +877,93 @@ export class FocusTrap {
     }
   }
 
+  /**
+   * Where a move starts, as the engine's sequential focus navigation starting point does. A
+   * stop holding focus starts the move, as does any other element holding focus, unless it is
+   * not a stop and holds the recorded point (a container or region with `tabindex="-1"` a press
+   * inside it focused): then the point does. With nothing holding focus (`<body>`), the
+   * recorded point does: the position the last press hit, or the place of the last element
+   * that took focus, even when that element has since left or been hidden. A point outside the
+   * trap's container moves as focus outside it does, to the first or last stop.
+   */
+  static #start(): Element | Range | null {
+    const active = deepActiveElement(document);
+    const start = FocusTrap.#registry(document).start;
+    if (active && active !== document.body) {
+      const at = start ? elementHoldingPosition(start.startContainer, start.startOffset) : null;
+      const pointInside =
+        !(active instanceof HTMLElement && isTabStop(active)) && flatTreeContains(active, at);
+      return pointInside ? start : active;
+    }
+    return start ?? active;
+  }
+
+  /**
+   * Records where a pointer press hit as the starting point: the caret position under the
+   * pointer when the engine reports one inside the pressed element that is a position in the
+   * tree, or else the start of that element (a caret in a text field's value is a place in the
+   * value, not in the tree). Every button and pointer type counts, cancelled presses included.
+   */
+  static #recordPress(registry: TrapRegistry, event: PointerEvent): void {
+    const path = event.composedPath();
+    const target = path[0] as Node;
+    const owner = target.ownerDocument ?? document;
+    const roots = path.filter((node): node is ShadowRoot => node instanceof ShadowRoot);
+    const caret = FocusTrap.#caretAt(owner, event.clientX, event.clientY, roots);
+    const range = owner.createRange();
+    const fits =
+      caret !== null &&
+      target.contains(caret.node) &&
+      caret.offset <=
+        (caret.node instanceof CharacterData ? caret.node.length : caret.node.childNodes.length);
+    if (fits) range.setStart(caret.node, caret.offset);
+    else range.setStart(target, 0);
+    range.collapse(true);
+    registry.start = range;
+    registry.pressed = true;
+  }
+
+  /**
+   * Records the element that took focus as the starting point, as a range around it, unless it
+   * is not a stop and holds the point the press that focused it left: that point stays.
+   */
+  static #recordFocus(registry: TrapRegistry, event: FocusEvent): void {
+    const target = event.composedPath()[0] as Element;
+    const point = registry.pressed ? registry.start : null;
+    const at = point ? elementHoldingPosition(point.startContainer, point.startOffset) : null;
+    const keep =
+      !(target instanceof HTMLElement && isTabStop(target)) && flatTreeContains(target, at);
+    registry.pressed = false;
+    if (keep) return;
+    const range = target.ownerDocument.createRange();
+    range.selectNode(target);
+    registry.start = range;
+  }
+
+  /**
+   * The caret position the engine reports at (`x`, `y`), looking into the open shadow roots
+   * `roots`, or `null` when the engine reports none.
+   */
+  static #caretAt(
+    owner: Document,
+    x: number,
+    y: number,
+    roots: ShadowRoot[],
+  ): { node: Node; offset: number } | null {
+    if (typeof owner.caretPositionFromPoint === "function") {
+      const position = owner.caretPositionFromPoint(x, y, { shadowRoots: roots });
+      return position ? { node: position.offsetNode, offset: position.offset } : null;
+    }
+    const legacy = owner as Document & {
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    };
+    if (typeof legacy.caretRangeFromPoint === "function") {
+      const range = legacy.caretRangeFromPoint(x, y);
+      return range ? { node: range.startContainer, offset: range.startOffset } : null;
+    }
+    return null;
+  }
+
   /** Selects the text of an input that focus moved into, as the engine's own `Tab` does. */
   static #selectOnEntry(stop: TabStopElement): void {
     if (stop instanceof HTMLInputElement && FocusTrap.#TEXT_ENTRY_TYPES.has(stop.type)) {
@@ -827,12 +973,13 @@ export class FocusTrap {
 
   /** Moves focus to the initial target, the first stop of the trap's order, or the container. */
   #focusInitial(): void {
+    const container = this.#readContainer();
+    if (!container) return;
     const preferred = this.#options.initialFocus?.();
     if (preferred) {
       preferred.focus();
       return;
     }
-    const container = this.#getContainer();
     const [first] = sequentialTabStops(container);
     if (first) {
       first.focus();

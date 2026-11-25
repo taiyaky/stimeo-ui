@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { ChipRow } from "../utils/chip_row";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { matchingPart, writeLabel } from "../utils/element_part";
@@ -66,6 +67,12 @@ import { TemplateRow } from "../utils/template_row";
  *   via empty-input `Backspace` keeps focus in the input for continued editing.
  * `change` and `reconcile` dispatch `{ tags: string[] }`; `reject` dispatches
  * `{ value: string, reason: "duplicate" | "empty" | "max" }`.
+ *
+ * When several `tags` containers coexist, only the first row supplies chips and
+ * owns their delegated interaction. Every later row is inert, including an empty
+ * one; focus in a row becoming inert moves to the input first. A row's authored
+ * inert value is returned when it becomes current or leaves the target scope.
+ * Hidden state and ARIA on later rows are left with the page.
  */
 export class TagsInputController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
@@ -93,6 +100,7 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   declare readonly inputTarget: HTMLInputElement;
   declare readonly tagsTarget: HTMLElement;
+  declare readonly tagsTargets: HTMLElement[];
   declare readonly tagTargets: HTMLElement[];
   declare readonly tagTemplateTarget: HTMLTemplateElement;
   declare readonly labelTargets: HTMLElement[];
@@ -124,9 +132,11 @@ export class TagsInputController extends Controller<HTMLElement> {
   });
   /** Collapses one target/Value mutation batch into one final-DOM repair pass. */
   readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileTags());
+  /** Borrows inert while a tags container stands behind the current row. */
+  readonly #rowInert = new AttributeLease<HTMLElement>("inert", this.identifier);
   readonly #chipRow = new ChipRow({
     getDirectionElement: () => this.#chipDirectionElement,
-    getItems: () => this.tagTargets,
+    getItems: () => this.#chips,
     getButton: (tag) =>
       matchingPart<HTMLButtonElement>(tag, `button${this.#rows.selector("remove")}`),
     onRemove: (index) => this.#removeAt(index),
@@ -139,7 +149,7 @@ export class TagsInputController extends Controller<HTMLElement> {
   override connect(): void {
     this.#rows.connect();
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
-    if (this.hasTagsTarget) this.#chipRow.connect(this.tagsTarget);
+    this.#settleTagsRows();
     const tags = this.#values;
     this.#syncState(tags);
     this.#tagValues = tags;
@@ -170,6 +180,9 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Releases only the row that disconnected, leaving a newer target intact. */
   tagsTargetDisconnected(tags: HTMLElement): void {
+    if (!this.scope.containsElement(tags) || !this.tagsTargets.includes(tags)) {
+      this.#rowInert.return(tags);
+    }
     this.#chipRow.disconnect(tags);
     this.#reconcile.schedule();
   }
@@ -257,7 +270,7 @@ export class TagsInputController extends Controller<HTMLElement> {
       this.#reject(value, "empty");
       return;
     }
-    if (this.#safeMax > 0 && this.tagTargets.length >= this.#safeMax) {
+    if (this.#safeMax > 0 && this.#chips.length >= this.#safeMax) {
       this.#reject(value, "max");
       return;
     }
@@ -296,7 +309,7 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Removes the tag at `index`, then applies the interaction-origin focus policy. */
   #removeAt(index: number, focus: "neighbor" | "input" = "neighbor"): void {
-    const tag = this.tagTargets[index];
+    const tag = this.#chips[index];
     if (!tag) return;
     const value = tag.dataset.value ?? "";
     tag.remove();
@@ -308,6 +321,29 @@ export class TagsInputController extends Controller<HTMLElement> {
       return;
     }
     if (!this.#chipRow.focusAfterRemoval(index)) this.#focusInput();
+  }
+
+  /** The chips in the first container, or the declared chips while no row exists. */
+  get #chips(): HTMLElement[] {
+    if (!this.hasTagsTarget) return this.tagTargets;
+    const row = this.tagsTarget;
+    const selector = this.#rows.selector("tags");
+    return this.tagTargets.filter((tag) => tag.closest(selector) === row);
+  }
+
+  /** Settles one interactive row, returning its inert before binding chip interaction. */
+  #settleTagsRows(): void {
+    const [current, ...behind] = this.tagsTargets;
+    if (!current) {
+      this.#chipRow.disconnect();
+      return;
+    }
+    this.#rowInert.return(current);
+    this.#chipRow.connect(current);
+    for (const row of behind) {
+      if (row.contains(document.activeElement)) this.#focusInput();
+      this.#rowInert.write(row, "");
+    }
   }
 
   /** Current tags container, or the root while the target is absent. */
@@ -355,7 +391,7 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Repairs derived state after DOM/Turbo changes and reports a changed tag order. */
   #reconcileTags(): void {
-    if (this.hasTagsTarget) this.#chipRow.connect(this.tagsTarget);
+    this.#settleTagsRows();
     const tags = this.#values;
     this.#syncState(tags);
     const changed = !this.#sameTags(this.#tagValues, tags);
@@ -382,7 +418,7 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Current tag values in order. */
   get #values(): string[] {
-    return this.tagTargets.map((tag) => tag.dataset.value ?? "");
+    return this.#chips.map((tag) => tag.dataset.value ?? "");
   }
 
   /** Whether two arrays carry the same values in the same submitted order. */

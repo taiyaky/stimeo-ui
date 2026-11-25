@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -60,6 +61,8 @@ export class StepIndicatorController extends Controller<HTMLElement> {
    * each one would otherwise rewrite every step's state.
    */
   readonly #repaint = new MorphRenderWatcher(() => this.#render());
+  /** The current-step attribute is returned when the step stops belonging here. */
+  readonly #current = new AttributeLease<HTMLElement>("aria-current", this.identifier);
 
   /** Renders the initial state from the `index` value. */
   override connect(): void {
@@ -78,7 +81,11 @@ export class StepIndicatorController extends Controller<HTMLElement> {
   }
 
   /** Re-derives the remaining steps when one is removed at runtime. */
-  stepTargetDisconnected(): void {
+  stepTargetDisconnected(step: HTMLElement): void {
+    if (!this.stepTargets.includes(step)) {
+      step.removeAttribute("data-state");
+      this.#current.return(step);
+    }
     this.#repaint.schedule();
   }
 
@@ -114,9 +121,9 @@ export class StepIndicatorController extends Controller<HTMLElement> {
   /**
    * Applies `data-state`, `aria-current`, and the progress ratio custom property.
    *
-   * A pure function of the step set and `index`, so running it again writes the
-   * same values — which is what lets the action path paint synchronously (the event
-   * goes out after the DOM is updated) while a coalesced pass may still follow.
+   * The same step set and `index` produce the same attribute and style values,
+   * so the action path can paint synchronously (the event goes out after the DOM
+   * is updated) while a coalesced pass may still follow.
    *
    * @stimeoRenderRoot
    */
@@ -126,11 +133,7 @@ export class StepIndicatorController extends Controller<HTMLElement> {
     this.stepTargets.forEach((step, index) => {
       step.dataset.state =
         index < current ? "complete" : index === current ? "current" : "upcoming";
-      if (index === current) {
-        step.setAttribute("aria-current", "step");
-      } else {
-        step.removeAttribute("aria-current");
-      }
+      this.#current.write(step, index === current ? "step" : null);
     });
     const ratio = total > 1 ? current / (total - 1) : 0;
     this.element.style.setProperty("--stimeo--step-indicator-ratio", String(ratio));

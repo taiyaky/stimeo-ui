@@ -18,9 +18,8 @@ const expectPristine = (): void => {
 };
 
 /**
- * The ledger is trusted to say what the DOM still holds, so every verdict here
- * is checked against delivery in the same environment: a listener the ledger
- * calls live receives the next event, and one it calls released does not.
+ * The ledger tracks registration lifetimes. Where happy-dom implements the
+ * relevant DOM behavior, delivery checks corroborate the ledger's result.
  */
 describe("recordListeners", () => {
   let ledger: ListenerLedger | null = null;

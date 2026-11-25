@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EditableController } from "../src/controllers/editable_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { keyEvent, press as pressKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -405,6 +406,188 @@ describe("EditableController", () => {
     );
     expect(root().dataset.mode).toBe("editing");
     expect(display().textContent).toBe("Original");
+  });
+
+  const mousePress = (target: HTMLElement, type: string, pointerId = 1) => {
+    target.dispatchEvent(
+      new PointerEvent(type, { bubbles: true, isPrimary: true, pointerType: "mouse", pointerId }),
+    );
+  };
+
+  it.each([
+    ["cancel", "Original", "cancel"],
+    ["save", "Changed", "change"],
+  ])(
+    "lets %s handle a mouse press that blurs without a destination",
+    async (action, value, event) => {
+      await mountWithControls();
+      const notifications: string[] = [];
+      root().addEventListener("stimeo--editable:change", () => notifications.push("change"));
+      root().addEventListener("stimeo--editable:cancel", () => notifications.push("cancel"));
+      display().click();
+      input().value = "Changed";
+
+      mousePress(control(action), "pointerdown");
+      input().blur();
+      expect(root().dataset.mode).toBe("editing");
+      expect(notifications).toEqual([]);
+
+      mousePress(control(action), "pointerup");
+      control(action).click();
+      expect(display().textContent).toBe(value);
+      expect(document.activeElement).toBe(display());
+      expect(notifications).toEqual([event]);
+    },
+  );
+
+  it.each(["pointercancel", "pointerup"])(
+    "waits for an outside focus destination after %s inside without activation",
+    async (end) => {
+      await mountWithControls();
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      display().click();
+      input().value = "Departed";
+
+      mousePress(control("cancel"), "pointerdown");
+      input().blur();
+      mousePress(control("cancel"), end);
+      expect(root().dataset.mode).toBe("editing");
+
+      outside.focus();
+      expect(root().dataset.mode).toBe("display");
+      expect(display().textContent).toBe("Departed");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
+
+  it("saves a mouse-induced blur when the matching press finishes outside", async () => {
+    await mountWithControls();
+    const outside = document.createElement("div");
+    document.body.append(outside);
+    display().click();
+    input().value = "Departed";
+
+    mousePress(control("cancel"), "pointerdown");
+    input().blur();
+    mousePress(outside, "pointerup", 2);
+    expect(root().dataset.mode).toBe("editing");
+
+    mousePress(outside, "pointerup");
+    expect(root().dataset.mode).toBe("display");
+    expect(display().textContent).toBe("Departed");
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("saves a deferred blur on the next outside press after a cancelled press", async () => {
+    await mountWithControls();
+    const outside = document.createElement("div");
+    document.body.append(outside);
+    display().click();
+    input().value = "Departed";
+
+    mousePress(control("cancel"), "pointerdown");
+    input().blur();
+    mousePress(outside, "pointercancel");
+    expect(root().dataset.mode).toBe("editing");
+
+    mousePress(outside, "pointerdown");
+    expect(display().textContent).toBe("Departed");
+  });
+
+  it("clears the deferred blur when focus returns inside the editor", async () => {
+    await mountWithControls();
+    const outside = document.createElement("div");
+    document.body.append(outside);
+    display().click();
+    input().value = "Active";
+    mousePress(control("cancel"), "pointerdown");
+    input().blur();
+    input().focus();
+
+    mousePress(outside, "pointerup");
+    expect(root().dataset.mode).toBe("editing");
+    expect(document.activeElement).toBe(input());
+  });
+
+  it("saves a normal blur during an outside mouse press", async () => {
+    await mountWithControls();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    display().click();
+    input().value = "Blurred";
+
+    mousePress(outside, "pointerdown");
+    input().blur();
+    expect(display().textContent).toBe("Blurred");
+  });
+
+  it.each(["save", "cancel", "disconnect"])(
+    "releases the document listeners on %s",
+    async (end) => {
+      await mountWithControls();
+      const ledger = recordListeners();
+      try {
+        display().click();
+        const editEvents = ["pointerdown", "pointerup", "pointercancel", "focusin"];
+        const activeEvents = () =>
+          ledger.live(document).filter((record) => editEvents.includes(record.type));
+        expect(activeEvents().map((record) => record.type)).toEqual(editEvents);
+
+        if (end === "disconnect") root().remove();
+        else control(end).click();
+        await tick();
+        expect(activeEvents()).toEqual([]);
+      } finally {
+        ledger.restore();
+      }
+    },
+  );
+
+  it.each([{ pointerType: "touch" }, { isPrimary: false }, { button: 2 }])(
+    "keeps normal blur saving after a press with %j",
+    async (overrides) => {
+      await mountWithControls();
+      display().click();
+      input().value = "Blurred";
+      control("cancel").dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          pointerId: 1,
+          pointerType: "mouse",
+          isPrimary: true,
+          ...overrides,
+        }),
+      );
+
+      input().blur();
+      expect(root().dataset.mode).toBe("display");
+      expect(display().textContent).toBe("Blurred");
+    },
+  );
+
+  it("drops an unresolved press and blur on disconnect", async () => {
+    await mountWithControls();
+    const editor = root();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    display().click();
+    input().value = "Before disconnect";
+    mousePress(control("cancel"), "pointerdown");
+    input().blur();
+
+    editor.remove();
+    await tick();
+    outside.focus();
+    expect(editor.querySelector("[data-stimeo--editable-target='display']")?.textContent).toBe(
+      "Original",
+    );
+    document.body.prepend(editor);
+    await tick();
+    display().click();
+    input().value = "New edit";
+    input().blur();
+    expect(display().textContent).toBe("New edit");
   });
 
   it("saves when focus leaves the editor entirely", async () => {

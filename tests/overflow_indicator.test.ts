@@ -6,16 +6,6 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link OverflowIndicatorController}: the
- * `data-overflow-start`/`data-overflow-end` sync from scroll geometry, the
- * `change` event, the button `disabled` mirroring, `scrollByPage` direction
- * handling, and resize teardown.
- *
- * happy-dom has no layout, so `scrollLeft`/`scrollWidth`/`clientWidth` are stubbed
- * and a viewport resize drives the controller; `scrollBy` is mocked.
- */
-
 const markup = `
   <div data-controller="stimeo--overflow-indicator"
        data-stimeo--overflow-indicator-orientation-value="horizontal">
@@ -74,6 +64,15 @@ class FakeResizeObserver implements ResizeObserver {
   }
 }
 
+/**
+ * Behavioral tests for {@link OverflowIndicatorController}: the
+ * `data-overflow-start`/`data-overflow-end` sync from scroll geometry, the
+ * `change` event, the button `disabled` mirroring, `scrollByPage` direction
+ * handling, and resize teardown.
+ *
+ * happy-dom has no layout, so `scrollLeft`/`scrollWidth`/`clientWidth` are stubbed
+ * and a viewport resize drives the controller; `scrollBy` is mocked.
+ */
 describe("OverflowIndicatorController", () => {
   let application: Application;
 
@@ -150,7 +149,7 @@ describe("OverflowIndicatorController", () => {
     expect(retained.getAttribute("data-overflow-end")).toBe("false");
   });
 
-  it("ignores an invalid direction while a newly inserted viewport awaits connection", async () => {
+  it("ignores an invalid direction before the viewport's new target token is delivered", async () => {
     document.body.innerHTML = markup.replace(
       'data-stimeo--overflow-indicator-target="viewport"',
       'id="pending-viewport"',
@@ -175,7 +174,7 @@ describe("OverflowIndicatorController", () => {
     expect(scroll).toHaveBeenCalledExactlyOnceWith({ left: 300, behavior: "smooth" });
   });
 
-  it("stops viewport observation when a batch removes every candidate", async () => {
+  it("resumes viewport updates when a target returns after all viewport tokens are removed", async () => {
     await start();
     layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
     const first = viewport();
@@ -419,7 +418,7 @@ describe("OverflowIndicatorController", () => {
     expect(pending.hasAttribute("data-overflow-indicator-pending-disabled")).toBe(false);
   });
 
-  it("restores an author-provided aria-disabled value after pending focus clears", async () => {
+  it("restores authored aria-disabled when scroll room returns while the button holds focus", async () => {
     await start();
     layout({ scrollLeft: 300, scrollWidth: 1000, clientWidth: 300 });
     const pending = button("end");
@@ -842,7 +841,7 @@ describe("OverflowIndicatorController", () => {
     expect(scrollBy).not.toHaveBeenCalled();
   });
 
-  it("does not mutate direction buttons owned by a nested instance", async () => {
+  it("keeps a nested start button disabled immediately after an outer scroll dispatch", async () => {
     document.body.innerHTML = `
       <div id="outer" data-controller="stimeo--overflow-indicator">
         <button type="button" data-stimeo--overflow-indicator-direction-param="start"
@@ -969,7 +968,7 @@ describe("OverflowIndicatorController", () => {
       ?.disconnect();
 
     expect(cancelled).toHaveLength(1);
-    // Running whatever the engine might still deliver must write nothing.
+    // Disconnect cancels the pending frame and leaves viewport attributes untouched.
     for (const callback of [...pending.values()]) callback(0);
     expect(writes).not.toHaveBeenCalled();
   });

@@ -129,15 +129,110 @@ describe("AvatarController", () => {
     expect(restoredImage.getAttribute("src")).toBe("/u/123.jpg");
 
     restoredImage.removeAttribute("data-stimeo--avatar-target");
-    controller().imageTargetDisconnected(restoredImage);
     restoredFallback.removeAttribute("data-stimeo--avatar-target");
-    controller().fallbackTargetDisconnected(restoredFallback);
+    await tick();
 
     expect(restoredImage.hasAttribute("src")).toBe(false);
     expect(restoredImage.hidden).toBe(true);
     expect(restoredFallback.hidden).toBe(false);
     expect(restoredImage.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
   });
+
+  describe.each(["live", "restored"] as const)("on a %s page", (page) => {
+    it.each([
+      { directSrc: "/authored.jpg", imageHidden: true, fallbackHidden: false },
+      { directSrc: undefined, imageHidden: false, fallbackHidden: true },
+    ])(
+      "returns the image and fallback attributes when the identifier is removed (image hidden=$imageHidden)",
+      async ({ directSrc, imageHidden, fallbackHidden }) => {
+        await start(markup({ directSrc, imageHidden, fallbackHidden }));
+        if (page === "restored") {
+          if (!application) throw new Error("Avatar application missing");
+          application = await restoreFromCache(application, (restored) =>
+            restored.register("stimeo--avatar", AvatarController),
+          );
+        }
+        const retainedImage = image();
+        const retainedFallback = fallback();
+        if (fallbackHidden) retainedImage.dispatchEvent(new Event("error"));
+
+        expect(retainedImage.getAttribute("src")).toBe("/u/123.jpg");
+        expect(retainedImage.hidden).toBe(!imageHidden);
+        expect(retainedFallback.hidden).toBe(!fallbackHidden);
+
+        root().removeAttribute("data-controller");
+        await tick();
+
+        expect(root().isConnected).toBe(true);
+        expect(retainedImage.getAttribute("src")).toBe(directSrc ?? null);
+        expect(retainedImage.hidden).toBe(imageHidden);
+        expect(retainedFallback.hidden).toBe(fallbackHidden);
+        expect(retainedImage.hasAttribute("data-stimeo--avatar-src-lease")).toBe(false);
+        expect(retainedImage.hasAttribute("data-stimeo--avatar-hidden-lease")).toBe(false);
+        expect(retainedFallback.hasAttribute("data-stimeo--avatar-hidden-lease")).toBe(false);
+      },
+    );
+  });
+
+  it("returns the controller element's attributes when it is the image target", async () => {
+    await start(`
+      <img id="avatar" data-controller="stimeo--avatar" data-stimeo--avatar-target="image"
+           data-stimeo--avatar-src-value="/u/123.jpg" src="/authored.jpg" hidden
+           alt="" aria-label="Jane Doe">`);
+    const element = root();
+    expect(element.getAttribute("src")).toBe("/u/123.jpg");
+    expect(element.hidden).toBe(false);
+
+    element.removeAttribute("data-controller");
+    await tick();
+
+    expect(element.getAttribute("src")).toBe("/authored.jpg");
+    expect(element.hidden).toBe(true);
+  });
+
+  it("returns the controller element's visibility when it is the fallback target", async () => {
+    await start(`
+      <span id="avatar" data-controller="stimeo--avatar" data-stimeo--avatar-target="fallback"
+            role="img" aria-label="Jane Doe" hidden>JD</span>`);
+    const element = root();
+    expect(element.hidden).toBe(false);
+
+    element.removeAttribute("data-controller");
+    await tick();
+
+    expect(element.hidden).toBe(true);
+  });
+
+  it.each(["image", "fallback"] as const)(
+    "keeps borrowed attributes throughout a move of the same %s target",
+    async (target) => {
+      await start(markup({ directSrc: "/authored.jpg" }));
+      const loadedImage = image();
+      const retainedFallback = fallback();
+      Object.defineProperty(loadedImage, "naturalWidth", { value: 64, configurable: true });
+      loadedImage.dispatchEvent(new Event("load"));
+      expect(root().getAttribute("data-state")).toBe("loaded");
+
+      const records: MutationRecord[] = [];
+      const observer = new MutationObserver((batch) => records.push(...batch));
+      const moved = target === "image" ? loadedImage : retainedFallback;
+      observer.observe(moved, { attributes: true, attributeFilter: ["src", "hidden"] });
+      try {
+        if (target === "image") root().append(moved);
+        else root().prepend(moved);
+        await tick();
+        records.push(...observer.takeRecords());
+      } finally {
+        observer.disconnect();
+      }
+
+      expect(root().getAttribute("data-state")).toBe("loaded");
+      expect(loadedImage.getAttribute("src")).toBe("/u/123.jpg");
+      expect(loadedImage.hidden).toBe(false);
+      expect(retainedFallback.hidden).toBe(true);
+      expect(records.map((record) => record.attributeName)).toEqual([]);
+    },
+  );
 
   it("keeps its materialized output after disconnect", async () => {
     await start(markup());

@@ -159,20 +159,23 @@ describe("AutoSubmitController", () => {
 
   it("dispatches submit (with trigger) before submitting", async () => {
     await start(SEARCH);
-    stubSubmit();
+    const order: string[] = [];
+    const submit = vi.fn(() => order.push("requestSubmit"));
+    form().requestSubmit = submit;
     const triggers: Array<EventTarget | null> = [];
     form().addEventListener("stimeo--auto-submit:submit", (event) => {
+      order.push("submit");
       triggers.push((event as CustomEvent<{ trigger: EventTarget | null }>).detail.trigger);
     });
     input().dispatchEvent(new Event("input", { bubbles: true }));
     await vi.advanceTimersByTimeAsync(300);
     expect(triggers).toEqual([input()]);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["submit", "requestSubmit"]);
   });
 
-  // `done`/`announce` react to Turbo completion (`turbo:submit-end`) independently
-  // of a prior debounce cycle, so we drive that signal directly. (Running the full
-  // submit cycle here would also trip a happy-dom MutationObserver quirk that
-  // double-connects the controller on attribute mutation — not a real-browser bug.)
+  // Dispatch turbo:submit-end directly to exercise the completion handler without
+  // a preceding submit.
   it("dispatches done on turbo:submit-end", async () => {
     await start(SEARCH);
     let done = 0;
@@ -281,8 +284,8 @@ describe("AutoSubmitController", () => {
       "stimeo--auto-submit",
     ) as AutoSubmitController;
     const submit = stubSubmit();
-    // Disconnect mid-composition (e.g. a Turbo cache restore), then reconnect the
-    // same instance — a stale composing flag must not suppress later submits.
+    // Disconnect mid-composition and reconnect the same controller. The next edit
+    // must be able to submit.
     input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
     controller.disconnect();
     controller.connect();

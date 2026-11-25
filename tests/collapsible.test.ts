@@ -548,6 +548,44 @@ describe("CollapsibleController", () => {
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("uses the live expanded state of a reconciled replacement trigger", async () => {
+    const previous = trigger();
+    const replacement = previous.cloneNode(true) as HTMLButtonElement;
+    previous.replaceWith(replacement);
+    await tick();
+
+    expect(replacement.getAttribute("aria-expanded")).toBe("false");
+    replacement.setAttribute("aria-expanded", "true");
+    controller().toggle();
+
+    expect(replacement.getAttribute("aria-expanded")).toBe("false");
+    expect(content().getAttribute("data-state")).toBe("closed");
+    expect(content().hidden).toBe(true);
+  });
+
+  it.each([false, true])(
+    "toggles live content before a replacement trigger connects (open=%s)",
+    async (open) => {
+      if (open) trigger().click();
+      const previous = trigger();
+      const replacement = previous.cloneNode(true) as HTMLButtonElement;
+      replacement.setAttribute("aria-expanded", String(!open));
+      const transitions: string[] = [];
+      const host = previous.parentElement;
+      host?.addEventListener("stimeo--collapsible:open", () => transitions.push("open"));
+      host?.addEventListener("stimeo--collapsible:close", () => transitions.push("closed"));
+
+      previous.replaceWith(replacement);
+      controller().toggle();
+
+      expect(content().getAttribute("data-state")).toBe(open ? "closed" : "open");
+      expect(replacement.getAttribute("aria-expanded")).toBe(String(!open));
+      await tick();
+      expect(content().hidden).toBe(open);
+      expect(transitions).toEqual([open ? "closed" : "open"]);
+    },
+  );
+
   it("reconciles a trigger inserted ahead of the connected one while that one stays", async () => {
     trigger().click();
     const incoming = trigger().cloneNode(true) as HTMLButtonElement;
@@ -922,11 +960,8 @@ describe("CollapsibleController", () => {
     const collapsedLabel = (root: ParentNode = document) =>
       query("[data-stimeo--collapsible-target='collapsedLabel']", root);
 
-    it("settles nothing when a half arrives with no trigger to sit in", async () => {
-      // The pair is resolved against the trigger, so a widget without one has no host
-      // to reflect into. Stimulus settles a target before the controller connects, so
-      // reaching for the absent trigger there throws out of the callback rather than
-      // through the application's own error handler.
+    it("leaves both labels unchanged when there is no trigger", async () => {
+      // Without a trigger, neither label has a host whose state it can reflect.
       const markup = `
         <div data-controller="stimeo--collapsible">
           <span data-stimeo--collapsible-target="expandedLabel">Hide</span>
@@ -1232,13 +1267,32 @@ describe("CollapsibleController", () => {
     });
 
     it("reports the close before the deferred hidden lands", () => {
+      vi.spyOn(window, "getComputedStyle").mockReturnValue({
+        transitionProperty: "height",
+        transitionDuration: "0.2s",
+        transitionDelay: "0s",
+      } as CSSStyleDeclaration);
       trigger().click();
       capture.clear();
+      const states: Array<[string | null, HTMLElement["hidden"]]> = [];
+      query("[data-controller='stimeo--collapsible']").addEventListener(
+        "stimeo--collapsible:close",
+        () => states.push([content().getAttribute("data-state"), content().hidden]),
+      );
 
       trigger().click();
 
       expect(capture.names()).toEqual(["close"]);
+      expect(states).toEqual([["closed", false]]);
       expect(content().getAttribute("data-state")).toBe("closed");
+      expect(content().hidden).toBe(false);
+
+      const end = new Event("transitionend", { bubbles: true });
+      Object.defineProperty(end, "propertyName", { value: "height" });
+      content().dispatchEvent(end);
+
+      expect(content().hidden).toBe(true);
+      expect(capture.names()).toEqual(["close"]);
     });
 
     it("reports a call with no DOM event as api", () => {

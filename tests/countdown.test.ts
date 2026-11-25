@@ -7,15 +7,14 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
+/** Fixed "now" so deadlines are deterministic across the suite. */
+const NOW = new Date("2026-06-06T00:00:00Z");
+
 /**
  * Behavioral tests for {@link CountdownController}, driven by a mocked clock:
  * remaining-time formatting, ticking, pause/resume accounting, completion,
  * count-up mode, and interval teardown on disconnect.
  */
-
-/** Fixed "now" so deadlines are deterministic across the suite. */
-const NOW = new Date("2026-06-06T00:00:00Z");
-
 describe("CountdownController", () => {
   let application: Application;
 
@@ -757,7 +756,7 @@ describe("CountdownController", () => {
     expect(slot("status").textContent).toBe("");
   });
 
-  it("follows a completion label without a status target present", async () => {
+  it("handles the completion-label callback without a status target", async () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--countdown" role="timer" aria-live="off"
            data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"
@@ -769,8 +768,7 @@ describe("CountdownController", () => {
     await vi.advanceTimersByTimeAsync(0);
     vi.advanceTimersByTime(2000);
     expect(root().getAttribute("data-state")).toBe("complete");
-    // `status` is optional, so a label swapped after completion has nowhere to go and
-    // must not throw on the missing target.
+    // The optional status target is absent when the completion-label callback runs.
     expect(() => instance().completeLabelValueChanged()).not.toThrow();
     expect(root().getAttribute("data-state")).toBe("complete");
   });
@@ -1084,7 +1082,7 @@ describe("CountdownController", () => {
     await vi.advanceTimersByTimeAsync(0);
   };
 
-  /** Every path that brings a status holding this controller's text up to date. */
+  /** Status reconciliation paths exercised by the following parameterized tests. */
   const RESYNCS: ReadonlyArray<readonly [string, () => void | Promise<void>]> = [
     [
       "the completion label changes",

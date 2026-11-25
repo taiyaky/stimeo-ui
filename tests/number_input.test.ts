@@ -667,7 +667,7 @@ describe("NumberInputController", () => {
     expect(changes).toEqual([{ value: 20 }]);
   });
 
-  it("uses a runtime step change without rewiring button listeners", async () => {
+  it("uses the new step on the next increment-button click", async () => {
     root().setAttribute("data-stimeo--number-input-step-value", "5");
     controller().stepValueChanged();
     await flushMicrotasks();
@@ -812,7 +812,7 @@ describe("NumberInputController", () => {
     expect(decrementBtn().disabled).toBe(false);
   });
 
-  it("keeps focus on the input after using a step button", () => {
+  it("focuses the input after an increment-button click", () => {
     incrementBtn().click();
     expect(document.activeElement).toBe(input());
   });
@@ -1253,7 +1253,7 @@ describe("NumberInputController", () => {
     expect(decrementBtn().disabled).toBe(true);
   });
 
-  it("keeps focus on the input after using the decrement button", () => {
+  it("moves focus from the decrement button to the input on click", () => {
     press("End");
     // The button holds focus and no pointerdown precedes the click, so only the step refocuses.
     decrementBtn().focus();
@@ -1624,7 +1624,7 @@ describe("NumberInputController on a custom spinbutton host", () => {
     await tick();
     expect(rangeAria(input())).toEqual(["3", "1", "5"]);
 
-    // A morph renders the server's markup, which carries none of it.
+    // Model a morph whose incoming markup omits all three range attributes.
     input().removeAttribute("aria-valuenow");
     input().removeAttribute("aria-valuemin");
     input().removeAttribute("aria-valuemax");
@@ -1917,7 +1917,7 @@ describe("NumberInputController on a custom spinbutton host", () => {
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
     composeDraft(input(), "４");
 
-    // A morph renders the server's markup, which carries none of it.
+    // Model a morph whose incoming markup omits all three range attributes.
     input().removeAttribute("aria-valuenow");
     input().removeAttribute("aria-valuemin");
     input().removeAttribute("aria-valuemax");
@@ -2488,7 +2488,7 @@ describe("NumberInputController press-and-hold", () => {
     vi.advanceTimersByTime(400 + 80); // -> 10, 20 (suppression now pending)
     releaseOutside();
     controller().disconnect();
-    // Re-connect the same element (Turbo cache / detach→reattach).
+    // Reconnect the same controller instance on the existing element.
     controller().connect();
     incrementBtn().click(); // the first click after reconnect must step
     expect(input().value).toBe("30");

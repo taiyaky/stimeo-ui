@@ -1,7 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
-import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AttributeLease } from "../utils/attribute_lease";
 import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { commitField, writeFields } from "../utils/field_mirror";
 import { INTERACTIVE_HOST_SELECTOR, isInteractiveHost } from "../utils/interactive_host";
@@ -112,6 +112,11 @@ function nextSortDirection(current: string): SortDirection {
  * DOM, and the target callbacks rebuild it again after rows or cells are added or
  * removed at runtime.
  *
+ * Row selection, cell/header tabindex, header sort and root multiselectability are
+ * borrowed attributes. Losing a target role or the controller identifier returns
+ * authored values while keeping subsequent page writes. Same-scope moves and
+ * whole-root detach keep state; records retain originals across cache copies.
+ *
  * Behavior provided:
  * - `Arrow*` move between cells (clamped at edges); `Home`/`End` to the row's
  *   first/last cell; `Ctrl+Home`/`Ctrl+End` to the grid's first/last cell.
@@ -154,6 +159,14 @@ export class DataGridController extends Controller<HTMLElement> {
   declare nameValue: string;
   declare formValue: string;
 
+  readonly #selected = new AttributeLease<HTMLElement>("aria-selected", this.identifier);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #sort = new AttributeLease<HTMLElement>("aria-sort", this.identifier);
+  readonly #multiselectable = new AttributeLease<HTMLElement>(
+    "aria-multiselectable",
+    this.identifier,
+  );
+
   /**
    * Collapses the target callbacks, Value changes and observed row writes of one
    * DOM mutation into a single pass, and refuses to run before `connect()` or
@@ -192,6 +205,7 @@ export class DataGridController extends Controller<HTMLElement> {
     this.#connectionGeneration += 1;
     this.#reconcile.disconnect();
     this.#observer.disconnect();
+    if (!this.scope.containsElement(this.element)) this.#multiselectable.return(this.element);
   }
 
   /**
@@ -279,7 +293,10 @@ export class DataGridController extends Controller<HTMLElement> {
   }
 
   /** Settles the selection again when a row leaves the grid or drops its target token. */
-  rowTargetDisconnected(): void {
+  rowTargetDisconnected(row: HTMLElement): void {
+    if (!this.scope.containsElement(row) || !this.rowTargets.includes(row)) {
+      this.#selected.return(row);
+    }
     this.#reconcile.schedule();
   }
 
@@ -289,7 +306,8 @@ export class DataGridController extends Controller<HTMLElement> {
   }
 
   /** Re-establishes the tab stop when a cell leaves the grid. */
-  cellTargetDisconnected(): void {
+  cellTargetDisconnected(cell: HTMLElement): void {
+    this.#returnTabindex(cell);
     this.#reconcile.schedule();
   }
 
@@ -299,8 +317,22 @@ export class DataGridController extends Controller<HTMLElement> {
   }
 
   /** Re-establishes the tab stop when a header leaves the grid. */
-  columnHeaderTargetDisconnected(): void {
+  columnHeaderTargetDisconnected(header: HTMLElement): void {
+    if (!this.scope.containsElement(header) || !this.columnHeaderTargets.includes(header)) {
+      this.#sort.return(header);
+    }
+    this.#returnTabindex(header);
     this.#reconcile.schedule();
+  }
+
+  /** Returns tabindex only after the element loses every navigable target role. */
+  #returnTabindex(cell: HTMLElement): void {
+    if (
+      this.scope.containsElement(cell) &&
+      (this.cellTargets.includes(cell) || this.columnHeaderTargets.includes(cell))
+    )
+      return;
+    this.#tabindex.return(cell);
   }
 
   /**
@@ -346,9 +378,9 @@ export class DataGridController extends Controller<HTMLElement> {
    */
   #syncSelectable(): void {
     if (this.selectionValue === "multiple") {
-      setAttributeIfChanged(this.element, "aria-multiselectable", "true");
+      this.#multiselectable.write(this.element, "true");
     } else {
-      this.element.removeAttribute("aria-multiselectable");
+      this.#multiselectable.write(this.element, null);
     }
   }
 
@@ -371,7 +403,7 @@ export class DataGridController extends Controller<HTMLElement> {
 
     // Only one column is sorted at a time: reset the others to `none`.
     for (const other of this.columnHeaderTargets) {
-      other.setAttribute("aria-sort", other === header ? direction : "none");
+      this.#sort.write(other, other === header ? direction : "none");
     }
 
     this.#setActiveCell(header, { focus: false });
@@ -506,7 +538,7 @@ export class DataGridController extends Controller<HTMLElement> {
   #cycleSort(header: HTMLElement): void {
     const direction = nextSortDirection(header.getAttribute("aria-sort") ?? "none");
     for (const other of this.columnHeaderTargets) {
-      other.setAttribute("aria-sort", other === header ? direction : "none");
+      this.#sort.write(other, other === header ? direction : "none");
     }
     this.dispatch("sort", { detail: { column: header, direction, reason: "user" } });
   }
@@ -627,7 +659,7 @@ export class DataGridController extends Controller<HTMLElement> {
     this.#stopHolder = cell;
     for (const candidate of cells ?? this.#navigableCells()) {
       const wanted = candidate === cell ? "0" : "-1";
-      setAttributeIfChanged(candidate, "tabindex", wanted);
+      this.#tabindex.write(candidate, wanted);
     }
     if (focus) cell.focus();
   }
@@ -670,7 +702,7 @@ export class DataGridController extends Controller<HTMLElement> {
    * receives it.
    */
   #writeSelection(target: HTMLElement, value: string | null): void {
-    setAttributeIfChanged(target, "aria-selected", value, () => {
+    this.#selected.write(target, value, () => {
       this.#observer.claim(target, "aria-selected", value);
     });
   }

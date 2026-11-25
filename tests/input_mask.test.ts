@@ -13,15 +13,6 @@ import {
 } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link InputMaskController} and the pure {@link applyMask}:
- * sequential formatting, character rejection, the complete/empty flags, raw-value
- * sync to the hidden field (incl. nearest-container, by-id and `form`-attribute
- * pairing for several masks in one form), the caret under insertion, rejection and
- * deletion, custom and malformed token declarations, the change/reconcile events,
- * runtime Value changes, non-editable fields, and teardown.
- */
-
 /** Builds a token map like the controller compiles internally. */
 const tokenMap = (entries: Record<string, string>) =>
   new Map(Object.entries(entries).map(([k, v]) => [k, new RegExp(`^(?:${v})$`)]));
@@ -34,6 +25,7 @@ interface ChangeDetail {
   complete: boolean;
 }
 
+/** Pure formatting, character rejection, and completion tests for {@link applyMask}. */
 describe("applyMask", () => {
   it("formats a fixed numeric pattern and reports complete", () => {
     const result = applyMask("1234567", "999-9999", NUMERIC);
@@ -111,6 +103,12 @@ describe("applyMask", () => {
   });
 });
 
+/**
+ * Behavioral tests for {@link InputMaskController}: formatting, character rejection,
+ * complete/empty flags, raw-value sync to hidden fields, caret preservation, custom
+ * token declarations, change/reconcile events, runtime Values, and teardown.
+ * Focus-preserving reconnects are simulated through direct lifecycle calls.
+ */
 describe("InputMaskController", () => {
   let application: Application;
 
@@ -670,7 +668,7 @@ describe("InputMaskController", () => {
     expect(field.value).toBe("");
   });
 
-  it("formats the confirmed IME text exactly once", async () => {
+  it("reports one change for the confirmed IME text even when the trailing input is delivered", async () => {
     await start(ZIP);
     const log = record();
     const field = input();
@@ -809,7 +807,7 @@ describe("InputMaskController", () => {
     ["a cancelled conversion", "123", "123", []],
     ["a confirmation the mask rejects a character of", "123あ", "123-", ["change"]],
   ])(
-    "reports %s after the field moved keeping focus as with no move",
+    "reports %s after a simulated focus-preserving reconnect as with no reconnect",
     async (_name, confirmed, shown, events) => {
       await start(ZIP);
       type("123");
@@ -820,7 +818,7 @@ describe("InputMaskController", () => {
       field.value = "123４";
       field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
 
-      // moveBefore keeps focus and the conversion; the controller reconnects around it.
+      // Simulate a focus-preserving reconnect on the same field.
       const instance = controller();
       instance.disconnect();
       instance.connect();
@@ -841,7 +839,7 @@ describe("InputMaskController", () => {
     ["tokens", "data-stimeo--input-mask-tokens-value", '{"9":"[0-4]"}'],
     ["unmaskToHidden", "data-stimeo--input-mask-unmask-to-hidden-value", "false"],
   ])(
-    "holds a re-format for a %s that changed with a move keeping focus, as it does with no move",
+    "holds a re-format for a %s changed during a simulated focus-preserving reconnect",
     async (_name, attribute, value) => {
       await start(ZIP);
       type("123");
@@ -852,7 +850,7 @@ describe("InputMaskController", () => {
       field.value = "123４";
       field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
 
-      // The morph that moves the field also changes its mask.
+      // Change the mask declaration while simulating the reconnect.
       reconnectKeepingFocus(controller(), () => field.setAttribute(attribute, value));
       await tick();
       expect(field.value).toBe("123４");
@@ -1283,7 +1281,7 @@ describe("InputMaskController", () => {
     expect(log.map((entry) => entry.event)).toEqual(["change"]);
   });
 
-  it("holds nothing when a move keeps focus and leaves the mask configuration unchanged", async () => {
+  it("holds nothing for a simulated focus-preserving reconnect with unchanged mask configuration", async () => {
     await start(ZIP);
     type("123");
     const log = record();
@@ -1505,7 +1503,7 @@ describe("InputMaskController", () => {
     [true, false],
     [true, true],
   ])(
-    "keeps a moving composition when sink synchronization is %s and the conversion commits %s",
+    "keeps a composition across a simulated focus-preserving reconnect when sink synchronization is %s and the conversion commits %s",
     async (enabled, committed) => {
       await start(`<form id="zip">${ZIP}</form>`);
       hidden().name = "zip";

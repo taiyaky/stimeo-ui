@@ -45,8 +45,9 @@ import { targetSelector } from "../utils/target_selector";
  *
  * @remarks
  * Behavior only. Options are authored in the DOM; the controller filters them by
- * toggling each option's `hidden` attribute (case-insensitive substring match on
- * its text). The consumer owns styling, typically keyed off `[aria-selected]`.
+ * hiding options whose text does not match (case-insensitive substring match).
+ * Authored `hidden` values are preserved. The consumer owns styling, typically
+ * keyed off `[aria-selected]`.
  * When an open listbox has no matching options, the root element gets
  * `data-stimeo--combobox-empty` so the consumer can style the empty state (hide
  * the list, dim it, …) — the library imposes no visuals. The optional `empty`
@@ -92,8 +93,14 @@ export class ComboboxController extends Controller<HTMLElement> {
   #connected = false;
   /** The list the open state was last applied to. */
   #list: HTMLElement | null = null;
+  /** The popup state retained while there is no list to render it. */
+  #open = false;
+  /** The option entry requested by an arrow while the list was unavailable. */
+  #pendingEntry: -1 | 1 | null = null;
   /** Borrows `hidden` on the list, to give back when an element stops being the list. */
   readonly #listHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Borrows `hidden` on options excluded by the query. */
+  readonly #optionHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
   /** Borrows `aria-expanded` on the input, to give back when an element stops being the input. */
   readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
   /** Borrows `aria-activedescendant` on the input, for the same return. */
@@ -101,6 +108,8 @@ export class ComboboxController extends Controller<HTMLElement> {
     "aria-activedescendant",
     this.identifier,
   );
+  readonly #optionSelected = new AttributeLease<HTMLElement>("aria-selected", this.identifier);
+  readonly #knownOptions = new Set<HTMLElement>();
   /** Collapses one mutation batch of target callbacks into a single pass. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileOptions());
   /**
@@ -118,6 +127,10 @@ export class ComboboxController extends Controller<HTMLElement> {
 
   /** Starts closed with no active option and registers the outside-click listener. */
   override connect(): void {
+    const options = new Set(this.optionTargets);
+    for (const option of this.#knownOptions) {
+      if (!options.has(option)) this.#returnOption(option);
+    }
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     this.close();
     this.#list = this.hasListTarget ? this.listTarget : null;
@@ -177,14 +190,26 @@ export class ComboboxController extends Controller<HTMLElement> {
 
   /** Establishes the active-state baseline, then reconciles a runtime addition. */
   optionTargetConnected(option: HTMLElement): void {
-    option.setAttribute("aria-selected", "false");
+    if (!this.#knownOptions.has(option)) {
+      this.#knownOptions.add(option);
+      syncActiveOption([option], null, this.#optionSelected);
+    }
     if (this.#connected) this.#queueOptionReconciliation();
   }
 
-  /** Clears the disconnected node's active state, then reconciles the survivors. */
+  /** Returns attributes when an option leaves this scope, then reconciles the survivors. */
   optionTargetDisconnected(option: HTMLElement): void {
-    option.setAttribute("aria-selected", "false");
+    if (!this.scope.containsElement(option) || !this.optionTargets.includes(option)) {
+      this.#returnOption(option);
+    }
     if (this.#connected) this.#queueOptionReconciliation();
+  }
+
+  /** Releases the attributes lent to an option while it belonged to this combobox. */
+  #returnOption(option: HTMLElement): void {
+    this.#knownOptions.delete(option);
+    this.#optionSelected.return(option);
+    this.#optionHidden.return(option);
   }
 
   /** Filters confirmed input text and opens the listbox. */
@@ -199,23 +224,27 @@ export class ComboboxController extends Controller<HTMLElement> {
    * re-opening with a stale non-matching value still surfaces the empty state).
    */
   open(): void {
-    if (!this.hasListTarget || !this.hasInputTarget || this.#suppressOpen) return;
+    if (!this.hasInputTarget || this.#suppressOpen) return;
+    this.#adoptList();
     this.#applyFilter();
-    this.#listHidden.write(this.listTarget, null);
+    this.#open = true;
+    this.#pendingEntry = null;
+    if (this.hasListTarget) this.#listHidden.write(this.listTarget, null);
     this.#expanded.write(this.inputTarget, "true");
     this.#setActive(-1);
     this.#reflectEmptyState();
   }
 
   /**
-   * Hides options that don't match the current input value (case-insensitive
-   * substring). An empty query shows every option. Does not change open state.
+   * Hides options excluded by the query and returns the visibility of matches.
+   * An empty query returns every option's borrowed `hidden`.
    */
   #applyFilter(): void {
     const query = this.inputTarget.value.trim().toLowerCase();
     for (const option of this.optionTargets) {
       const text = (option.textContent ?? "").trim().toLowerCase();
-      option.hidden = query.length > 0 && !text.includes(query);
+      if (text.includes(query)) this.#optionHidden.return(option);
+      else if (!option.hidden) this.#optionHidden.write(option, "");
     }
   }
 
@@ -230,8 +259,10 @@ export class ComboboxController extends Controller<HTMLElement> {
    * unconditional and only the ARIA half is guarded.
    */
   close(): void {
-    if (!this.hasListTarget) return;
-    this.#listHidden.write(this.listTarget, "");
+    this.#adoptList();
+    this.#open = false;
+    this.#pendingEntry = null;
+    if (this.hasListTarget) this.#listHidden.write(this.listTarget, "");
     this.#reflectEmptyState();
     if (this.hasInputTarget) this.#expanded.write(this.inputTarget, "false");
     this.#setActive(-1);
@@ -253,6 +284,7 @@ export class ComboboxController extends Controller<HTMLElement> {
     // after the yield above.
     if (isReservedArrowChord(event, ["alt"])) return;
     if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
+    this.#adoptList();
     // The two chords the pattern claims. `Alt+Down` shows the popup *without*
     // moving focus into it, and `Alt+Up` returns focus and closes — which is
     // what separates them from the bare arrows below, where the point is to
@@ -285,6 +317,8 @@ export class ComboboxController extends Controller<HTMLElement> {
           const activeIndex = this.#findActiveIndex(visible);
           const next = activeIndex === -1 ? 0 : (activeIndex + 1) % visible.length;
           this.#setActive(next);
+        } else if (!this.hasListTarget) {
+          this.#pendingEntry = 1;
         }
         break;
       }
@@ -301,6 +335,8 @@ export class ComboboxController extends Controller<HTMLElement> {
               ? visible.length - 1
               : (activeIndex - 1 + visible.length) % visible.length;
           this.#setActive(next);
+        } else if (!this.hasListTarget) {
+          this.#pendingEntry = -1;
         }
         break;
       }
@@ -417,7 +453,7 @@ export class ComboboxController extends Controller<HTMLElement> {
    * are a pure function of the state rather than of the order things happened in.
    */
   #reflectEmptyState(): void {
-    const empty = !this.#isClosed && this.#visibleOptions().length === 0;
+    const empty = this.hasListTarget && !this.#isClosed && this.#visibleOptions().length === 0;
     if (empty) {
       this.element.setAttribute(`data-${this.identifier}-empty`, "");
     } else {
@@ -435,7 +471,7 @@ export class ComboboxController extends Controller<HTMLElement> {
     const active = index === -1 ? null : (visible[index] ?? null);
     // The full target set, not just the visible ones: an option hidden by
     // filtering while active would otherwise keep a stale selected state.
-    syncActiveOption(this.optionTargets, active);
+    syncActiveOption(this.optionTargets, active, this.#optionSelected);
     this.#activeId = active?.id || null;
     if (this.hasInputTarget) this.#activeDescendant.write(this.inputTarget, active?.id || null);
     // Virtual focus never triggers the browser's native focus-scrolling, so a
@@ -444,16 +480,16 @@ export class ComboboxController extends Controller<HTMLElement> {
   }
 
   /**
-   * Moves the open state onto the list that is now first, when that list changed. A list
-   * that arrives with none before it arrives closed. Then reconciles the options against it.
+   * Moves the retained open state onto the first list before an action or target callback.
    */
   #adoptList(): void {
     if (!this.#connected) return;
     const list = this.hasListTarget ? this.listTarget : null;
     const previous = this.#list;
     if (list === previous) return;
+    if (previous) this.#open = !previous.hidden;
     this.#list = list;
-    if (list) this.#listHidden.write(list, (previous?.hidden ?? true) ? "" : null);
+    if (list) this.#listHidden.write(list, this.#open ? null : "");
     this.#queueOptionReconciliation();
   }
 
@@ -463,7 +499,18 @@ export class ComboboxController extends Controller<HTMLElement> {
       this.#expanded.write(this.inputTarget, String(!this.#isClosed));
       if (!this.#isClosed) this.#applyFilter();
     }
-    this.#reconcileActive();
+    if (
+      this.#pendingEntry !== null &&
+      this.hasListTarget &&
+      this.hasInputTarget &&
+      !this.#isClosed
+    ) {
+      const index = this.#pendingEntry === 1 ? 0 : this.#visibleOptions().length - 1;
+      this.#pendingEntry = null;
+      this.#setActive(index);
+    } else {
+      this.#reconcileActive();
+    }
     this.#reflectEmptyState();
   }
 
@@ -505,11 +552,11 @@ export class ComboboxController extends Controller<HTMLElement> {
 
   /** The options currently shown (not filtered out). */
   #visibleOptions(): HTMLElement[] {
-    return this.optionTargets.filter((option) => !option.hidden);
+    return this.hasListTarget ? this.optionTargets.filter((option) => !option.hidden) : [];
   }
 
   /** Whether the listbox is currently hidden. */
   get #isClosed(): boolean {
-    return !this.hasListTarget || this.listTarget.hidden !== false;
+    return this.#list ? this.#list.hidden !== false : !this.#open;
   }
 }

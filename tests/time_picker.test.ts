@@ -244,7 +244,7 @@ describe("TimePickerController", () => {
       },
     );
 
-    it("keeps the period for Home, End and direct digits within zero through eleven", async () => {
+    it("keeps the period when changing a zero-based hour with Home, End, or direct digits", async () => {
       await mount12({ meridiem: 1, zeroBased: true });
       key(seg("hour"), "Home");
       expect(field().value).toBe("12:30");
@@ -546,7 +546,7 @@ describe("TimePickerController", () => {
   );
 
   it.each(["replace", "read", "repeat"])(
-    "settles the time before native reports and suppresses replaced reports: %s",
+    "reports the final time once when a native listener replaces, leaves, or repeats the edit: %s",
     async (mode) => {
       await mount24();
       const seen: string[] = [];
@@ -572,13 +572,12 @@ describe("TimePickerController", () => {
     },
   );
 
-  it("reverses the horizontal arrows under RTL, leaving the value pair alone", async () => {
+  it("reverses horizontal focus navigation under RTL and still changes the value on ArrowUp", async () => {
     // Logical direction. `dir="rtl"` is the authoring contract, but happy-dom
     // does not resolve it into the computed style, so the direction is set as an
     // inline style instead.
-    // The segments lay out as an inline row, so RTL mirrors them and "next
-    // segment" is to the left. `ArrowUp` / `ArrowDown`
-    // change the value and must not follow the direction.
+    // The horizontal arrows move between segments under RTL; ArrowUp still changes
+    // the hour value.
     await mount24();
     root().style.direction = "rtl";
     const before = field().value;
@@ -589,7 +588,7 @@ describe("TimePickerController", () => {
     key(seg("minute"), "ArrowRight"); // "previous segment"
     expect(document.activeElement).toBe(seg("hour"));
 
-    key(seg("hour"), "ArrowUp"); // still "more", regardless of direction
+    key(seg("hour"), "ArrowUp"); // changes the hour value
     expect(field().value).not.toBe(before);
   });
 
@@ -924,7 +923,7 @@ describe("TimePickerController", () => {
     expect(field().value).toBe("09:30");
   });
 
-  it("carries across noon and midnight in both directions on a 12-hour clock", async () => {
+  it("carries across noon in both directions and forward across midnight on a 12-hour clock", async () => {
     await mount12({ hour: 11, minute: 59, meridiem: 0 });
 
     key(seg("minute"), "ArrowUp");

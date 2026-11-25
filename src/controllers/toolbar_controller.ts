@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { ownerIndex } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
@@ -74,6 +75,11 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * effectively when the attribute is absent, so annotating only the intended
  * entry point makes the *first* control win instead.
  *
+ * `tabindex` is borrowed while a control is a target. Losing its target role or
+ * the controller identifier returns its authored value unless the page wrote a
+ * different value meanwhile. Moves within the scope and whole-root detach keep
+ * the current stop; ownership records preserve the authored value across a cache copy.
+ *
  * Known constraint: a toolbar that contains a text input competes with it for
  * the arrow keys — the APG expects the toolbar to own them. Keep free-text
  * fields outside the toolbar (IME composition is yielded to, but caret movement
@@ -91,7 +97,12 @@ export class ToolbarController extends Controller<HTMLElement> {
   declare orientationValue: string;
   declare wrapValue: boolean;
 
-  readonly #roving = new RovingTabindex(() => this.controlTargets);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #managedControls = new WeakSet<HTMLElement>();
+  readonly #roving = new RovingTabindex(
+    () => this.controlTargets,
+    (control, value) => this.#writeTabindex(control, value),
+  );
   readonly #composition = new CompositionTracker();
   #observer: MutationObserver | null = null;
   /**
@@ -152,15 +163,25 @@ export class ToolbarController extends Controller<HTMLElement> {
    * stops — and then the lone stop is re-established.
    */
   controlTargetConnected(control: HTMLElement): void {
-    if (!this.#connected) return;
-    control.tabIndex = -1;
+    if (!this.#connected || this.#managedControls.has(control)) return;
+    this.#writeTabindex(control, -1);
     this.#ensureTabStop();
   }
 
-  /** Removing the control that held the Tab stop must not orphan the group. */
-  controlTargetDisconnected(): void {
+  /** Returns a departed control's tabindex and preserves a stop among the survivors. */
+  controlTargetDisconnected(control: HTMLElement): void {
+    if (!this.scope.containsElement(control) || !this.controlTargets.includes(control)) {
+      this.#managedControls.delete(control);
+      this.#tabindex.return(control);
+    }
     if (!this.#connected) return;
     this.#ensureTabStop();
+  }
+
+  /** Records controlled targets so an in-scope move does not initialize them again. */
+  #writeTabindex(control: HTMLElement, value: 0 | -1): void {
+    this.#managedControls.add(control);
+    this.#tabindex.write(control, String(value));
   }
 
   /**

@@ -500,8 +500,7 @@ describe("ComboboxController", () => {
   it("ignores Enter fired during an IME composition", () => {
     type("ap");
     press("ArrowDown"); // active apple
-    // The Enter confirming an IME candidate carries isComposing=true: it must
-    // not commit the option or close the popup.
+    // Enter with isComposing=true leaves the input and popup unchanged.
     pressKey(input(), "Enter", { isComposing: true, bubbles: true });
     expect(input().value).toBe("ap");
     expect(list().hidden).toBe(false);
@@ -1363,6 +1362,23 @@ describe("ComboboxController", () => {
       return copy;
     };
 
+    it.each([false, true])(
+      "adopts the page's last visibility before a list replacement (hidden: %s)",
+      async (hidden) => {
+        if (hidden) controller().open();
+        const previous = list();
+        expect(previous.hidden).toBe(!hidden);
+        previous.hidden = hidden;
+        const successor = listCopy(!hidden);
+
+        previous.replaceWith(successor);
+        await tick();
+
+        expect(successor.hidden).toBe(hidden);
+        expect(input().getAttribute("aria-expanded")).toBe(String(!hidden));
+      },
+    );
+
     it("keeps the popup open on a replacement delivered in one task", async () => {
       controller().open();
       const successor = listCopy(true);
@@ -1395,16 +1411,77 @@ describe("ComboboxController", () => {
       expect(input().getAttribute("aria-expanded")).toBe("false");
     });
 
-    it("closes the popup when the only list leaves, and a later list arrives closed", async () => {
+    it("keeps the popup open while the only list is absent", async () => {
       controller().open();
-      const arrival = listCopy(false);
+      const arrival = listCopy(true);
       list().remove();
       await tick();
-      expect(input().getAttribute("aria-expanded")).toBe("false");
+      expect(input().getAttribute("aria-expanded")).toBe("true");
 
       root().append(arrival);
       await tick();
-      expect(arrival.hidden).toBe(true);
+      expect(arrival.hidden).toBe(false);
+    });
+
+    it.each(["close", "Escape", "open", "ArrowDown", "ArrowUp"] as const)(
+      "handles %s before a replacement list is observed or while no list exists",
+      async (action) => {
+        const opens = action === "open" || action === "ArrowDown" || action === "ArrowUp";
+        for (const timing of ["settled", "same task", "no target"]) {
+          if (opens) controller().close();
+          else controller().open();
+          const oldList = list();
+          const arrival = listCopy(true);
+          if (timing === "no target") oldList.remove();
+          else oldList.replaceWith(arrival);
+          if (timing !== "same task") await tick();
+
+          if (action === "open" || action === "close") controller()[action]();
+          else expect(press(action), timing).toBe(false);
+          expect(input().getAttribute("aria-expanded"), timing).toBe(String(opens));
+          if (timing === "no target") root().append(arrival);
+          await tick();
+          expect(arrival.hidden, timing).toBe(!opens);
+          const active = input().getAttribute("aria-activedescendant");
+          const expected = {
+            close: null,
+            Escape: null,
+            open: null,
+            ArrowDown: "opt-apple",
+            ArrowUp: "opt-banana",
+          };
+          expect(active, timing).toBe(expected[action]);
+        }
+      },
+    );
+
+    it("waits for the popup target before activating options still in scope", async () => {
+      controller().open();
+      const popup = list();
+      const targetAttribute = "data-stimeo--combobox-target";
+      popup.removeAttribute(targetAttribute);
+      expect(option("opt-apple").hidden).toBe(false);
+
+      expect(press("ArrowDown")).toBe(false);
+      expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+      expect(option("opt-apple").getAttribute("aria-selected")).toBe("false");
+
+      await tick();
+      popup.setAttribute(targetAttribute, "list");
+      await tick();
+      expect(popup.hidden).toBe(false);
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apple");
+    });
+
+    it("dismisses a popup the page showed on an outside click", () => {
+      const popup = list();
+      expect(popup.hidden).toBe(true);
+      popup.hidden = false;
+
+      document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      expect(popup.hidden).toBe(true);
+      expect(input().getAttribute("aria-expanded")).toBe("false");
     });
 
     it("hides a list left in the page without its target token", async () => {
@@ -1420,12 +1497,26 @@ describe("ComboboxController", () => {
       expect(successor.hidden).toBe(false);
     });
 
-    it("closes the popup when the only list loses its target token", async () => {
+    it("moves the next active option on a replacement list before target callbacks run", async () => {
+      controller().open();
+      press("ArrowDown");
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apple");
+      const successor = listCopy(true);
+      list().replaceWith(successor);
+
+      expect(press("ArrowDown")).toBe(false);
+      expect(successor.hidden).toBe(false);
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apricot");
+      await tick();
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apricot");
+    });
+
+    it("returns authored hidden while the only list loses its target token", async () => {
       controller().open();
       list().removeAttribute("data-stimeo--combobox-target");
       await tick();
 
-      expect(input().getAttribute("aria-expanded")).toBe("false");
+      expect(input().getAttribute("aria-expanded")).toBe("true");
       expect(list().hidden).toBe(true);
     });
 
@@ -1476,25 +1567,32 @@ describe("ComboboxController", () => {
       expect(behind.hidden).toBe(true);
     });
 
-    it("writes nothing into the widget when a list arrives behind the open one", async () => {
-      // A filter is in force, so a pass that ran anyway would write the filtered
-      // option's `hidden` again, which queues a record even when the value is the same.
+    it("keeps a page-shown option visible when a list arrives behind the open one", async () => {
+      input().focus();
       type("ap");
-      expect(option("opt-banana").hidden).toBe(true);
+      press("ArrowDown");
+      const banana = option("opt-banana");
+      expect(banana.hidden).toBe(true);
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apple");
+      banana.hidden = false;
+
       const behind = document.createElement("ul");
       behind.setAttribute("role", "listbox");
       behind.setAttribute("data-stimeo--combobox-target", "list");
       behind.hidden = true;
-      const writes: MutationRecord[] = [];
-      const observer = new MutationObserver((records) => writes.push(...records));
-      observer.observe(root(), { attributes: true, subtree: true });
-
       list().after(behind);
       await tick();
-      writes.push(...observer.takeRecords());
-      observer.disconnect();
 
-      expect(writes.map((write) => write.attributeName)).toEqual([]);
+      expect(behind.hidden).toBe(true);
+      expect(list().hidden).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(input().getAttribute("aria-expanded")).toBe("true");
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apple");
+      expect(option("opt-apple").getAttribute("aria-selected")).toBe("true");
+      expect(banana.hidden).toBe(false);
+
+      type("app");
+      expect(banana.hidden).toBe(true);
     });
 
     it("reports nothing while it moves the open state", async () => {
@@ -1559,6 +1657,69 @@ describe("ComboboxController", () => {
       expect(input().value).toBe("apricot");
     });
 
+    it("preserves an active ID-less option when it moves within its combobox", async () => {
+      const apple = option("opt-apple");
+      apple.removeAttribute("id");
+      type("ap");
+      press("ArrowDown");
+      expect(apple.getAttribute("aria-selected")).toBe("true");
+      expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+
+      list().append(apple);
+      await tick();
+      expect(apple.getAttribute("aria-selected")).toBe("true");
+      press("Enter");
+      expect(input().value).toBe("apple");
+    });
+
+    it("returns a page update after navigation writes to that option again", async () => {
+      activateApricot();
+      const banana = option("opt-banana");
+      expect(banana.getAttribute("aria-selected")).toBe("false");
+      banana.setAttribute("aria-selected", "true");
+      press("ArrowUp");
+      expect(banana.getAttribute("aria-selected")).toBe("false");
+
+      banana.removeAttribute("data-stimeo--combobox-target");
+      await tick();
+      expect(banana.getAttribute("aria-selected")).toBe("true");
+    });
+
+    it("initializes a re-admitted candidate before reconciling its page-written selection", async () => {
+      type("ap");
+      const apple = option("opt-apple");
+      apple.removeAttribute("id");
+      apple.removeAttribute("data-stimeo--combobox-target");
+      await tick();
+      apple.setAttribute("aria-selected", "true");
+      apple.setAttribute("data-stimeo--combobox-target", "option");
+      await tick();
+
+      expect(apple.getAttribute("aria-selected")).toBe("false");
+      press("Enter");
+      expect(input().value).toBe("ap");
+    });
+
+    it("returns visibility and selection on reconnect when an option was unmarked offline", async () => {
+      type("ap");
+      const host = root();
+      const banana = option("opt-banana");
+      expect(banana.hidden).toBe(true);
+      expect(banana.getAttribute("aria-selected")).toBe("false");
+
+      host.remove();
+      await tick();
+      expect(banana.hidden).toBe(true);
+      expect(banana.getAttribute("aria-selected")).toBe("false");
+      banana.removeAttribute("data-stimeo--combobox-target");
+      document.body.append(host);
+      await tick();
+
+      expect(banana.hidden).toBe(false);
+      expect(banana.hasAttribute("aria-selected")).toBe(false);
+      expect(list().hidden).toBe(true);
+    });
+
     it("clears active state when the active target token is removed", async () => {
       activateApricot();
       const removedActive = option("opt-apricot");
@@ -1570,7 +1731,7 @@ describe("ComboboxController", () => {
 
       expect(input().hasAttribute("aria-activedescendant")).toBe(false);
       expect(activeOptionIds()).toEqual([]);
-      expect(removedActive.getAttribute("aria-selected")).toBe("false");
+      expect(removedActive.hasAttribute("aria-selected")).toBe(false);
 
       press("Enter");
       expect(selections).toEqual([]);
@@ -1610,7 +1771,7 @@ describe("ComboboxController", () => {
       expect(input().getAttribute("aria-activedescendant")).toBe("opt-apricot");
       expect(activeOptionIds()).toEqual(["opt-apricot"]);
       expect(replacement.getAttribute("aria-selected")).toBe("true");
-      expect(original.getAttribute("aria-selected")).toBe("false");
+      expect(original.hasAttribute("aria-selected")).toBe(false);
 
       press("Enter");
       expect(input().value).toBe("apricot-next");
@@ -1654,7 +1815,7 @@ describe("ComboboxController", () => {
 
       expect(input().hasAttribute("aria-activedescendant")).toBe(false);
       expect(activeOptionIds()).toEqual([]);
-      expect(last.getAttribute("aria-selected")).toBe("false");
+      expect(last.hasAttribute("aria-selected")).toBe(false);
       expect(root().hasAttribute("data-stimeo--combobox-empty")).toBe(true);
 
       press("Enter");

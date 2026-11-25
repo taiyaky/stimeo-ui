@@ -42,7 +42,9 @@ export class AvatarController extends Controller<HTMLElement> {
   static events = ["error"] as const;
 
   declare readonly imageTarget: HTMLImageElement;
+  declare readonly imageTargets: HTMLImageElement[];
   declare readonly fallbackTarget: HTMLElement;
+  declare readonly fallbackTargets: HTMLElement[];
   declare readonly hasImageTarget: boolean;
   declare readonly hasFallbackTarget: boolean;
   declare srcValue: string;
@@ -53,8 +55,6 @@ export class AvatarController extends Controller<HTMLElement> {
   readonly #src = new AttributeLease<HTMLImageElement>("src", this.identifier);
   readonly #imageHidden = new AttributeLease<HTMLImageElement>("hidden", this.identifier);
   readonly #fallbackHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
-  /** True only while target departure means ownership was actually relinquished. */
-  #connected = false;
   /** Watches the non-Value render input used by the direct `<img src>` form. */
   readonly #srcObserver = new MutationObserver((records) => {
     if (records.some((record) => this.hasImageTarget && record.target === this.imageTarget)) {
@@ -64,7 +64,6 @@ export class AvatarController extends Controller<HTMLElement> {
 
   /** Starts retained-DOM observation and silently derives the current phase. */
   override connect(): void {
-    this.#connected = true;
     this.#reconcile.observe(this.element);
     this.#srcObserver.observe(this.element, {
       attributes: true,
@@ -74,9 +73,8 @@ export class AvatarController extends Controller<HTMLElement> {
     this.#render();
   }
 
-  /** Cancels asynchronous work while retaining the last materialized visual state. */
+  /** Stops observation and cancels queued reconciliation. */
   override disconnect(): void {
-    this.#connected = false;
     this.#reconcile.disconnect();
     this.#srcObserver.disconnect();
   }
@@ -91,9 +89,9 @@ export class AvatarController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   }
 
-  /** Returns attributes borrowed from an image that leaves this live avatar. */
+  /** Returns borrowed attributes once the element stops resolving as an image target. */
   imageTargetDisconnected(image: HTMLImageElement): void {
-    if (this.#connected) {
+    if (!this.scope.containsElement(image) || !this.imageTargets.includes(image)) {
       this.#src.return(image);
       this.#imageHidden.return(image);
     }
@@ -105,9 +103,11 @@ export class AvatarController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   }
 
-  /** Returns authored visibility when a fallback leaves this live avatar. */
+  /** Returns borrowed visibility once the element stops resolving as a fallback target. */
   fallbackTargetDisconnected(fallback: HTMLElement): void {
-    if (this.#connected) this.#fallbackHidden.return(fallback);
+    if (!this.scope.containsElement(fallback) || !this.fallbackTargets.includes(fallback)) {
+      this.#fallbackHidden.return(fallback);
+    }
     this.#reconcile.schedule();
   }
 

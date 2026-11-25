@@ -64,9 +64,9 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *   from the clicked element.
  * - A trigger or a menu that takes over — in one task, or after an earlier one
  *   leaves in a later task — carries the open state; focus stays where the swap
- *   left it. With no menu left the menu button reads closed and leaves the Escape
- *   stack. One that stops resolving as the target gets back what it carried before
- *   this controller wrote on it.
+ *   left it. Actions reconcile the first menu before acting; the open state and
+ *   Escape dismissal remain available during an absence. Departing targets get
+ *   their authored attributes back.
  * - Each move of the open state is reported: `stimeo--menu:open` and
  *   `stimeo--menu:close` dispatch `{ reason: StateReason }`, after the state
  *   attributes are written. Both are informational, so neither is cancelable. A
@@ -117,6 +117,8 @@ export class MenuController extends Controller<HTMLElement> {
   readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
   /** The menu the open state was last applied to. */
   #menu: HTMLElement | null = null;
+  /** The open state kept while no menu is available. */
+  #openState = false;
 
   /**
    * The outermost item a click started in, recorded in the capture pass. Read once by
@@ -142,6 +144,7 @@ export class MenuController extends Controller<HTMLElement> {
 
   /** Starts closed and registers activation / outside-click listeners. */
   override connect(): void {
+    this.#menu = this.hasMenuTarget ? this.menuTarget : null;
     this.#close("api");
     this.#listeners.add(this.element, "click", this.#onItemClickCapture, { capture: true });
     this.#listeners.add(this.element, "click", this.#onDelegatedItemClick);
@@ -216,49 +219,42 @@ export class MenuController extends Controller<HTMLElement> {
     // A reopen must discard a pending Tab close, or the stale task would slam
     // the freshly opened menu shut on the next tick.
     this.#timers.clearAll();
-    if (!this.hasMenuTarget) return;
-    const menu = this.menuTarget;
+    this.#adoptMenu();
     const was = this.#isOpen;
+    this.#openState = true;
     this.#escapeLayer.activate(document, {
       onDismiss: () => this.#closeAndRestore("escape"),
       claims: claimsWhileFocusWithin(this.element),
     });
-    this.#menuHidden.write(menu, null);
-    this.#menu = menu;
-    if (this.hasTriggerTarget) this.#expanded.write(this.triggerTarget, "true");
+    if (this.#menu) this.#menuHidden.write(this.#menu, null);
+    this.#reflectTrigger();
     if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
   }
 
   /** Closes the menu, reflects the collapsed state, and reports a move. */
   #close(reason: StateReason): void {
+    this.#adoptMenu();
+    const was = this.#isOpen;
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
-    const menu = this.hasMenuTarget ? this.menuTarget : null;
-    this.#menu = menu;
-    if (!menu) return;
-    const was = this.#isOpen;
-    this.#menuHidden.write(menu, "");
-    if (this.hasTriggerTarget) this.#expanded.write(this.triggerTarget, "false");
+    this.#openState = false;
+    if (this.#menu) this.#menuHidden.write(this.#menu, "");
+    this.#reflectTrigger();
     if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
   }
 
   /**
-   * Moves the open state onto the menu that is now first, when that menu changed: one that took
-   * over carries the state of the menu before it, and one that arrives with none before it
-   * arrives closed. With none left, the menu button leaves the Escape stack. The trigger then
-   * reads the menu, changed or not. Focus stays where the swap left it, and nothing is
-   * dispatched.
+   * Transfers the open state before an action or target callback. With no menu, its last
+   * state and Escape layer remain. Adoption changes neither focus nor the event stream.
    */
   #adoptMenu(): void {
     if (!this.#connected) return;
     const menu = this.hasMenuTarget ? this.menuTarget : null;
     const previous = this.#menu;
+    if (previous) this.#openState = !previous.hidden;
     this.#menu = menu;
-    if (!menu) {
-      this.#escapeLayer.deactivate();
-    } else if (menu !== previous) {
-      this.#menuHidden.write(menu, (previous?.hidden ?? true) ? "" : null);
-    }
+    if (!this.#openState) this.#escapeLayer.deactivate();
+    if (menu && menu !== previous) this.#menuHidden.write(menu, this.#openState ? null : "");
     this.#reflectTrigger();
   }
 
@@ -476,14 +472,16 @@ export class MenuController extends Controller<HTMLElement> {
   #focusFirst(): void {
     // A subscriber may close the menu from the `open` handler; focusing then puts
     // the caret on an item nobody can see.
-    if (!this.#isOpen) return;
+    this.#adoptMenu();
+    if (!this.#menu || !this.#isOpen) return;
     this.#navigableItems[0]?.focus();
   }
 
   /** Moves focus to the last navigable item (no-op if none). */
   #focusLast(): void {
     // See {@link MenuController.#focusFirst}.
-    if (!this.#isOpen) return;
+    this.#adoptMenu();
+    if (!this.#menu || !this.#isOpen) return;
     const items = this.#navigableItems;
     items[items.length - 1]?.focus();
   }
@@ -514,6 +512,6 @@ export class MenuController extends Controller<HTMLElement> {
 
   /** Whether the menu is currently visible. */
   get #isOpen(): boolean {
-    return this.hasMenuTarget && !this.menuTarget.hidden;
+    return this.#menu ? !this.#menu.hidden : this.#openState;
   }
 }

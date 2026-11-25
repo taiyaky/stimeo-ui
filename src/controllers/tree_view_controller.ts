@@ -1,7 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
-import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AttributeLease } from "../utils/attribute_lease";
 import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { commitField, writeField } from "../utils/field_mirror";
 import { canTakeFocus } from "../utils/focus_candidate";
@@ -99,10 +99,15 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  * confirmation's reports that have not started dispatching. Reading state or
  * confirming it unchanged does not replace them.
  *
+ * Item `aria-selected`, `tabindex` and `aria-expanded`, and target groups' `hidden`,
+ * are borrowed. Losing a target role or the controller identifier returns the
+ * authored values while retaining subsequent page writes. Moves within the scope
+ * and whole-root detach keep state; ownership records retain originals across copies.
+ *
  * Contract notes:
- * - A child container is resolved by `role="group"`, not by the target: the
- *   `group` target is what `stimeo check`'s accessibility rule anchors on, which
- *   is why the contract declares it.
+ * - A child container is resolved by `role="group"`. Its `hidden` is controlled
+ *   only while it is a `group` target; a structural group without that target
+ *   keeps the visibility the page writes.
  * - Nested interactive controls (natively interactive elements such as `button`,
  *   `input`, `select`, `textarea`, `label`, `a[href]`, `summary`) and IME composition
  *   keys are left alone; a click on a child `group`'s own box (its indentation
@@ -143,10 +148,18 @@ export class TreeViewController extends Controller<HTMLElement> {
   static events = ["select", "toggle", "reconcile"] as const;
 
   declare readonly itemTargets: HTMLElement[];
+  declare readonly groupTargets: HTMLElement[];
   declare readonly fieldTarget: HTMLInputElement;
   declare readonly hasFieldTarget: boolean;
 
-  readonly #roving = new RovingTabindex(() => this.itemTargets);
+  readonly #selected = new AttributeLease<HTMLElement>("aria-selected", this.identifier);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  readonly #roving = new RovingTabindex(
+    () => this.itemTargets,
+    (item, value) => this.#tabindex.write(item, String(value)),
+  );
   readonly #typeahead = new Typeahead();
   /**
    * Collapses the item and field callbacks and observed item writes of one DOM
@@ -388,6 +401,10 @@ export class TreeViewController extends Controller<HTMLElement> {
    * is reported as `reconcile` with no item.
    */
   itemTargetDisconnected(item: HTMLElement): void {
+    if (this.scope.containsElement(item) && this.itemTargets.includes(item)) return;
+    this.#selected.return(item);
+    this.#tabindex.return(item);
+    this.#expanded.return(item);
     // Stimulus drains the target callbacks for a removed *tree* before calling
     // `disconnect()`; recovering a roving position for a widget that is already
     // gone would move focus for nothing.
@@ -403,6 +420,23 @@ export class TreeViewController extends Controller<HTMLElement> {
     // several callbacks, so rebuilding from `itemTargets` here would also erase
     // the recorded position of every sibling whose callback has yet to run.
     this.#order = this.#order.filter((tracked) => tracked !== item);
+  }
+
+  /** Applies expansion to a group that takes on its target role. */
+  groupTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Returns a departed group's visibility, including after the controller identifier leaves. */
+  groupTargetDisconnected(group: HTMLElement): void {
+    if (this.scope.containsElement(group) && this.groupTargets.includes(group)) return;
+    this.#hidden.return(group);
+    this.#reconcile.schedule();
+  }
+
+  /** Writes visibility only while the structural child group is an owned target. */
+  #writeGroupHidden(group: HTMLElement, hidden: boolean): void {
+    if (this.groupTargets.includes(group)) this.#hidden.write(group, hidden ? "" : null);
   }
 
   /**
@@ -625,7 +659,7 @@ export class TreeViewController extends Controller<HTMLElement> {
     if (firstChild) this.#focusItem(firstChild);
   }
 
-  /** `ArrowLeft`: collapse an expanded parent, else step out to the parent item. */
+  /** Collapses an expanded parent, else steps out to the parent item. */
   #collapseOrLeave(item: HTMLElement): void {
     const group = this.#childGroup(item);
     if (group && this.#isExpanded(item)) {
@@ -699,8 +733,8 @@ export class TreeViewController extends Controller<HTMLElement> {
     expanded: boolean,
     reason: StateReason = "user",
   ): void {
-    item.setAttribute("aria-expanded", String(expanded));
-    group.hidden = !expanded;
+    this.#expanded.write(item, String(expanded));
+    this.#writeGroupHidden(group, !expanded);
     if (!expanded) this.#escapeCollapsedSubtree(item, group);
     this.dispatch("toggle", { detail: { item, expanded, reason } });
   }
@@ -775,9 +809,9 @@ export class TreeViewController extends Controller<HTMLElement> {
       const group = this.#childGroup(item);
       if (!group) continue;
       if (item.hasAttribute("aria-expanded")) {
-        group.hidden = !this.#isExpanded(item);
+        this.#writeGroupHidden(group, !this.#isExpanded(item));
       } else {
-        item.setAttribute("aria-expanded", String(!group.hidden));
+        this.#expanded.write(item, String(!group.hidden));
       }
     }
   }
@@ -857,7 +891,7 @@ export class TreeViewController extends Controller<HTMLElement> {
    * receives it.
    */
   #writeSelection(target: HTMLElement, value: string | null): void {
-    setAttributeIfChanged(target, "aria-selected", value, () => {
+    this.#selected.write(target, value, () => {
       this.#observer.claim(target, "aria-selected", value);
     });
   }

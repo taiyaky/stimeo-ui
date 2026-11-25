@@ -1,7 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { AttributeLease } from "../utils/attribute_lease";
-import { firstTabStop, isTabStop } from "../utils/focus_candidate";
+import { isTabStop, sequentialTabStops } from "../utils/focus_candidate";
 import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
@@ -273,7 +273,7 @@ export class NestedFormController extends Controller<HTMLElement> {
     }
 
     this.#refresh();
-    firstTabStop(row)?.focus();
+    sequentialTabStops(row)[0]?.focus();
     this.dispatch("add", { detail: { index, element: row } });
     this.#announce();
   }
@@ -332,7 +332,7 @@ export class NestedFormController extends Controller<HTMLElement> {
     const rows = this.#effectiveRows;
     const ordered = [...rows.slice(position), ...rows.slice(0, position).reverse()];
     for (const row of ordered) {
-      const stop = firstTabStop(row);
+      const [stop] = sequentialTabStops(row);
       if (stop) {
         stop.focus();
         return;

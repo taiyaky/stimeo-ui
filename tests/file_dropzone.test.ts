@@ -1400,12 +1400,38 @@ describe("FileDropzoneController", () => {
       );
       expect(watch).not.toBe(-1);
       const watcher = observe.mock.contexts[watch];
+      release.mockClear();
 
       controller()?.disconnect();
       expect(release.mock.contexts).toContain(watcher);
     } finally {
       observe.mockRestore();
       release.mockRestore();
+    }
+  });
+
+  it("does not render a removed preview while the retained dropzone is disconnected", async () => {
+    await mount();
+    drop(file("a.jpg", "image/jpeg"));
+    const preview = list().firstElementChild as HTMLElement;
+    preview.remove();
+    await tick();
+    expect(list().firstElementChild).toBe(preview);
+
+    const reinserted: Node[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) reinserted.push(...record.addedNodes);
+    });
+    observer.observe(list(), { childList: true });
+    try {
+      preview.remove();
+      controller()?.disconnect();
+      await tick();
+
+      expect(reinserted).not.toContain(preview);
+      expect(preview.isConnected).toBe(false);
+    } finally {
+      observer.disconnect();
     }
   });
 

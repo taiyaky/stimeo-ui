@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 
@@ -32,10 +33,10 @@ interface FilterOutcome {
  *   </div>
  *
  * `match` decides how multiple active tokens combine: `all` (default — an item must
- * carry every active token) or `any` (at least one). With no active token every item
- * is shown. Items are toggled via `hidden`; groups with zero visible items and the
- * `empty` element are kept in sync, and `stimeo--filter:change` reports the outcome
- * when it moves.
+ * carry every active token) or `any` (at least one). Filtering adds `hidden` only
+ * to nonmatching items; matching items retain authored hidden state. Groups with
+ * zero visible items and the `empty` element are kept in sync, and
+ * `stimeo--filter:change` reports the outcome when it moves.
  *
  * `change` dispatches `{ active, visibleCount, total }` — the active tokens, how
  * many items they leave visible, and how many items there are — whenever an
@@ -89,6 +90,9 @@ export class FilterController extends Controller<HTMLElement> {
 
   readonly #morphRender = new MorphRenderWatcher(() => this.#evaluate());
 
+  /** Borrows item filtering and derived group/empty visibility until their target roles end. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+
   /** The listeners of one connection, released together on `disconnect()`. */
   readonly #listeners = new ListenerSet();
 
@@ -104,6 +108,32 @@ export class FilterController extends Controller<HTMLElement> {
     this.#morphRender.disconnect();
     this.#connected = false;
     this.#listeners.dispose();
+  }
+
+  /** Gives a former item its hidden state back after its final visibility role ends. */
+  itemTargetDisconnected(item: HTMLElement): void {
+    this.#releaseHidden(item);
+  }
+
+  /** Gives a former group its hidden state back after its final visibility role ends. */
+  groupTargetDisconnected(group: HTMLElement): void {
+    this.#releaseHidden(group);
+  }
+
+  /** Gives a former empty region its hidden state back after its final visibility role ends. */
+  emptyTargetDisconnected(empty: HTMLElement): void {
+    this.#releaseHidden(empty);
+  }
+
+  /** Keeps one shared hold while any current target role still controls the element. */
+  #releaseHidden(element: HTMLElement): void {
+    if (
+      this.itemTargets.includes(element) ||
+      this.groupTargets.includes(element) ||
+      this.emptyTargets.includes(element)
+    )
+      return;
+    this.#hidden.return(element);
   }
 
   /**
@@ -137,16 +167,16 @@ export class FilterController extends Controller<HTMLElement> {
     const active = this.#activeTokens();
     let visibleCount = 0;
     for (const item of this.itemTargets) {
-      const visible = this.#matches(item, active);
-      item.hidden = !visible;
-      if (visible) visibleCount += 1;
+      if (this.#matches(item, active)) this.#hidden.return(item);
+      else if (!item.hidden) this.#hidden.write(item, "");
+      if (!item.hidden) visibleCount += 1;
     }
 
     for (const group of this.groupTargets) {
-      group.hidden = !this.#hasVisibleItem(group);
+      this.#hidden.write(group, this.#hasVisibleItem(group) ? null : "");
     }
     for (const empty of this.emptyTargets) {
-      empty.hidden = visibleCount > 0;
+      this.#hidden.write(empty, visibleCount > 0 ? "" : null);
     }
 
     const total = this.itemTargets.length;
@@ -198,7 +228,7 @@ export class FilterController extends Controller<HTMLElement> {
     return control instanceof HTMLInputElement ? control.value : "";
   }
 
-  /** Whether an item satisfies the active token set per `match` (empty active → shown). */
+  /** Whether an item satisfies `match`; with no active tokens, every item matches. */
   #matches(item: HTMLElement, active: string[]): boolean {
     if (active.length === 0) return true;
     const tokens = this.#tokensOf(item);

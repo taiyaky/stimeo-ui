@@ -967,6 +967,28 @@ describe("ConfirmController", () => {
       await expect(next).resolves.toBe(false);
     });
 
+    it("keeps a pending replacement prompt when a stale hook asks during a reconnect", async () => {
+      await start(PAGE);
+      const instance = controller();
+      const ask = turboConfirm();
+      const first = ask("First?");
+      let stale: Promise<boolean> | undefined;
+      onFirst("stimeo--confirm:resolve", () => {
+        instance.disconnect();
+        stale = ask("Stale?");
+        instance.connect();
+      });
+
+      const second = ask("Second?");
+
+      await expect(first).resolves.toBe(false);
+      await expect(stale).resolves.toBe(false);
+      expect(dialog().hidden).toBe(false);
+      expect(message().textContent).toBe("Second?");
+      cancelBtn().click();
+      await expect(second).resolves.toBe(false);
+    });
+
     it("asks nothing once disconnected: the prompt settles false with no dialog and no events", async () => {
       await start(PAGE);
       const ask = turboConfirm();
@@ -1138,22 +1160,31 @@ describe("ConfirmController", () => {
       },
     );
 
-    it("settles the prompt as cancelled when the only dialog leaves", async () => {
-      opener().focus();
-      const outcomes: boolean[] = [];
-      root().addEventListener("stimeo--confirm:resolve", (e) => {
-        outcomes.push((e as CustomEvent<{ confirmed: boolean }>).detail.confirmed);
-      });
-      const answer = settlement(turboConfirm()("Delete?"));
-      dialog().remove();
-      await tick();
+    it.each(["confirm", "cancel", "Escape"] as const)(
+      "settles the pending prompt with %s while no dialog is present",
+      async (action) => {
+        opener().focus();
+        const outcomes: boolean[] = [];
+        root().addEventListener("stimeo--confirm:resolve", (e) => {
+          outcomes.push((e as CustomEvent<{ confirmed: boolean }>).detail.confirmed);
+        });
+        const answer = settlement(turboConfirm()("Delete?"));
+        dialog().remove();
+        await tick();
 
-      expect(answer.value).toBe(false);
-      expect(outcomes).toEqual([false]);
-      expect(document.body.style.overflow).toBe("");
-      expect(query("main").inert).toBe(false);
-      expect(document.activeElement).toBe(opener());
-    });
+        expect(answer.value).toBeUndefined();
+        expect(outcomes).toEqual([]);
+        if (action === "Escape") typeKey(document, "Escape");
+        else controller()[action]();
+        await tick();
+        const confirmed = action === "confirm";
+        expect(answer.value).toBe(confirmed);
+        expect(outcomes).toEqual([confirmed]);
+        expect(document.body.style.overflow).toBe("");
+        expect(query("main").inert).toBe(false);
+        expect(document.activeElement).toBe(opener());
+      },
+    );
 
     it("closes a dialog that replaces the current one while no prompt is open", async () => {
       const successor = dialogCopy();
@@ -1164,17 +1195,40 @@ describe("ConfirmController", () => {
       expect(successor.hidden).toBe(true);
     });
 
-    it("closes a dialog that arrives after the only one left", async () => {
-      turboConfirm()("Delete?");
+    it("shows the pending prompt on a dialog that arrives after the only one left", async () => {
+      opener().focus();
+      const answer = turboConfirm()("Delete?");
       const arrival = dialogCopy();
-      arrival.hidden = false;
       dialog().remove();
       await tick();
       root().append(arrival);
       await tick();
 
-      expect(arrival.hidden).toBe(true);
-      expect(document.body.style.overflow).toBe("");
+      expect(arrival.hidden).toBe(false);
+      expect(wording(arrival)).toEqual(["Delete?", "Keep", "Delete"]);
+      expect(document.activeElement).toBe(inside(arrival, "cancel"));
+      expect(query("main").inert).toBe(true);
+      expect(document.body.style.overflow).toBe("hidden");
+      inside(arrival, "confirm").click();
+      await expect(answer).resolves.toBe(true);
+      expect(document.activeElement).toBe(opener());
+    });
+
+    it("keeps the prompt when an open subscriber removes its dialog before activation", async () => {
+      opener().focus();
+      const arrival = dialogCopy();
+      root().addEventListener("stimeo--confirm:open", () => dialog().remove(), { once: true });
+      const answer = turboConfirm()("Keep waiting?");
+      await tick();
+      root().append(arrival);
+      await tick();
+
+      expect(arrival.hidden).toBe(false);
+      expect(wording(arrival)).toEqual(["Keep waiting?", "Keep", "Delete"]);
+      expect(document.activeElement).toBe(inside(arrival, "cancel"));
+      typeKey(document, "Escape");
+      await expect(answer).resolves.toBe(false);
+      expect(document.activeElement).toBe(opener());
     });
 
     it("opens the next prompt on a dialog that arrived after the only one left", async () => {
@@ -1303,24 +1357,27 @@ describe("ConfirmController", () => {
       expect(document.activeElement).toBe(inside(dialog(), "cancel"));
     });
 
-    it("settles the prompt when its message and its dialog leave in one task", async () => {
+    it("holds the pending prompt when its message and dialog leave together", async () => {
       const answer = settlement(turboConfirm()("Delete?"));
       message().remove();
       dialog().remove();
       await tick();
 
-      expect(answer.value).toBe(false);
+      expect(answer.value).toBeUndefined();
     });
 
-    it("settles the prompt as cancelled when the only dialog loses its target token", async () => {
+    it("returns authored hidden while the only dialog loses its target token", async () => {
       opener().focus();
       const answer = settlement(turboConfirm()("Delete?"));
       const only = dialog();
       only.removeAttribute(targetAttribute);
       await tick();
 
-      expect(answer.value).toBe(false);
+      expect(answer.value).toBeUndefined();
       expect(only.hidden).toBe(true);
+      controller().cancel();
+      await tick();
+      expect(answer.value).toBe(false);
       expect(document.body.style.overflow).toBe("");
       expect(document.activeElement).toBe(opener());
     });

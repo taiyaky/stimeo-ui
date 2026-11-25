@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { EscapeLayer } from "../utils/escape_layer";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -52,11 +53,16 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *   dismissal in place.
  * - `showDelay` and `hideDelay` are read when a show or hide is requested: a pending one
  *   keeps the deadline it was scheduled with, and the next request reads the value then.
- * - The shown content holds its Escape layer and scroll dismissal only while it is in
- *   the DOM: once it leaves (a removal, or a morph that swaps in other content) both are
- *   released and a pending show or hide is dropped. When the page hides the content
- *   itself, the next hide request, Escape or dismissing scroll releases them the same
- *   way; the content already reads hidden, so nothing is reported.
+ * - The shown state survives a content replacement or absence. Actions resolve the
+ *   current target before reading visibility; a replacement receives the retained state
+ *   silently. Pending show/hide requests keep their deadlines across that absence.
+ * - The logical shown state holds its Escape layer even without content, so Escape can
+ *   close the pending surface once. Scroll dismissal is held only while content exists.
+ *   When the page hides the current content itself, the next hide request, Escape or
+ *   dismissing scroll releases both; content already reads hidden, so nothing is reported.
+ * - Visibility and `data-state` are borrowed attributes: a content element leaving the
+ *   target scope receives its authored values, preserving later page writes. Same-scope
+ *   moves and whole-root detaches keep them for the next connection.
  * - Each move of the shown state is reported: `stimeo--tooltip:open` and
  *   `stimeo--tooltip:close` dispatch `{ reason: StateReason }`, after the state
  *   attributes are written. The reason is taken from the event that started the
@@ -104,19 +110,26 @@ export class TooltipController extends Controller<HTMLElement> {
   #pointerActive = false;
   /** Cleanup for the dismiss-on-scroll listeners while shown, or `null`. */
   #stopScrollDismiss: (() => void) | null = null;
-  /**
-   * The content this controller revealed while the Escape layer and the scroll dismissal
-   * are held for it, or `null` when nothing is held.
-   */
-  #shownContent: HTMLElement | null = null;
+  /** The logical shown state, retained while its content target is absent. */
+  #open = false;
+  /** The reveal whose continuation may acquire Escape and scroll resources. */
+  #revealToken: object | null = null;
+  /** The content the shown state was last reflected onto, including a hidden one. */
+  #currentContent: HTMLElement | null = null;
+  /** Borrows authored visibility and state until the content leaves the target scope. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  readonly #state = new AttributeLease<HTMLElement>("data-state", this.identifier);
 
   /** Whether state moves are reported: set once `connect()` settled the baseline. */
   #reporting = false;
 
   /** Starts hidden with no stale timer or interaction state from a prior connection. */
   override connect(): void {
+    this.#reporting = false;
     this.#cancelTimers();
     this.#resetInteractionState();
+    this.#open = false;
+    this.#currentContent = null;
     this.#conceal("api");
     this.#reporting = true;
   }
@@ -129,6 +142,8 @@ export class TooltipController extends Controller<HTMLElement> {
     this.#reporting = false;
     this.#cancelTimers();
     this.#release();
+    this.#open = false;
+    this.#currentContent = null;
   }
 
   /**
@@ -138,30 +153,29 @@ export class TooltipController extends Controller<HTMLElement> {
    * `connect()` finds nothing held either.
    */
   closeOnScrollValueChanged(): void {
-    if (this.#shownContent) this.#syncScrollDismiss();
+    if (this.#open) this.#syncScrollDismiss();
+  }
+
+  /** Applies the retained shown state to a newly available first content target. */
+  contentTargetConnected(): void {
+    if (this.#reporting) this.#syncContent();
   }
 
   /**
-   * Releases what the shown content holds once it leaves the DOM — a removal, or a morph
-   * that swaps in other content — and writes the hidden state onto it and onto any content
-   * that remains. Pending show and hide timers are dropped with it; the focus and pointer
-   * presence stay recorded, because the trigger they describe is still there. Nothing is
-   * dispatched: target churn is not a state move anyone made. After {@link disconnect},
-   * which already released everything, this leaves the DOM alone.
+   * Returns attributes only when the element leaves the target scope, including after
+   * controller teardown. A same-scope move and a whole-root detach keep their leases.
+   * While connected, any replacement receives the retained state without a new report.
    */
   contentTargetDisconnected(content: HTMLElement): void {
-    if (content !== this.#shownContent) return;
-    // Content moved within the element is disconnected and connected again as a target.
-    if (this.contentTargets.includes(content)) return;
-    this.#cancelTimers();
-    this.#release();
-    content.hidden = true;
-    content.setAttribute("data-state", "closed");
-    this.#reflectHidden();
+    if (this.#reporting) this.#syncContent();
+    if (!this.scope.containsElement(content) || !this.contentTargets.includes(content)) {
+      this.#returnContent(content);
+    }
   }
 
   /** Shows after `showDelay`, recording the focus/pointer reason supplied by an action event. */
   show(event?: Event): void {
+    this.#syncContent();
     const reason = stateReasonFor(event);
     this.#activateInteraction(event);
     this.#cancelHide();
@@ -182,6 +196,7 @@ export class TooltipController extends Controller<HTMLElement> {
    * layer and scroll dismissal is hidden the same way, which releases them.
    */
   hide(event?: Event): void {
+    this.#syncContent();
     const reason = stateReasonFor(event);
     const interactionEnded = this.#deactivateInteraction(event);
     if (interactionEnded && this.#hasActiveInteraction) return;
@@ -199,17 +214,19 @@ export class TooltipController extends Controller<HTMLElement> {
 
   /** Reveals the content, reports a move, and joins the Escape stack / scroll watcher. */
   #reveal(reason: StateReason): void {
-    if (!this.hasContentTarget) return;
-    const content = this.contentTarget;
+    this.#syncContent();
     const was = this.#isVisible;
-    content.hidden = false;
-    content.setAttribute("data-state", "open");
-    this.#shownContent = content;
+    this.#open = true;
+    const token = {};
+    this.#revealToken = token;
+    this.#reflectContent(this.#currentContent, true);
     if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
     // A subscriber may hide the tooltip or tear the controller down from the handler
     // above, and both release it; a layer or a scroll dismissal taken after that
     // would belong to nothing shown.
-    if (this.#shownContent !== content) return;
+    if (!this.#open || !this.#reporting) return;
+    this.#syncContent();
+    if (this.#revealToken !== token) return;
     // No claims predicate: a shown hover hint is dismissible regardless of
     // where focus sits (WCAG 2.2 SC 1.4.13), so it always claims while shown.
     this.#escapeLayer.activate(document, { onDismiss: () => this.#dismiss("escape") });
@@ -220,22 +237,48 @@ export class TooltipController extends Controller<HTMLElement> {
   #conceal(reason: StateReason): void {
     // The layer and the scroll dismissal are released whatever the DOM holds now,
     // so content missing from it never keeps them.
+    this.#syncContent();
     const was = this.#isVisible;
+    this.#open = false;
     this.#release();
-    this.#reflectHidden();
+    this.#reflectContent(this.#currentContent, false);
     if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
   }
 
-  /** Writes the hidden state onto the content target, where present. */
-  #reflectHidden(): void {
-    if (!this.hasContentTarget) return;
-    this.contentTarget.hidden = true;
-    this.contentTarget.setAttribute("data-state", "closed");
+  /** Moves the retained state onto the first current target before an action reads it. */
+  #syncContent(): void {
+    const next = this.hasContentTarget ? this.contentTarget : null;
+    const current = this.#currentContent;
+    if (current === next) return;
+    if (current) {
+      // Returning the lease can hide a departing surface, so read its state first.
+      this.#open = !current.hidden;
+      if (!this.scope.containsElement(current) || !this.contentTargets.includes(current)) {
+        this.#returnContent(current);
+      } else this.#reflectContent(current, false);
+    }
+    this.#currentContent = next;
+    this.#reflectContent(next, this.#open);
+    if (!this.#open) this.#release();
+    else this.#syncScrollDismiss();
+  }
+
+  /** Reflects one content element while preserving the attributes it lends. */
+  #reflectContent(content: HTMLElement | null, open: boolean): void {
+    if (!content) return;
+    this.#hidden.write(content, open ? null : "");
+    this.#state.write(content, open ? "open" : "closed");
+  }
+
+  /** Gives an element back its authored visibility and state. */
+  #returnContent(content: HTMLElement): void {
+    this.#hidden.return(content);
+    this.#state.return(content);
   }
 
   /** Leaves the Escape stack and drops the scroll dismissal; nothing is held afterwards. */
   #release(): void {
-    this.#shownContent = null;
+    this.#revealToken = null;
     this.#escapeLayer.deactivate();
     this.#stopScrollDismiss?.();
     this.#stopScrollDismiss = null;
@@ -248,7 +291,7 @@ export class TooltipController extends Controller<HTMLElement> {
    *   what is shown does not depend on it.
    */
   #syncScrollDismiss(): void {
-    if (this.closeOnScrollValue) {
+    if (this.closeOnScrollValue && this.#currentContent && this.#open) {
       this.#stopScrollDismiss ??= observeScrollDismiss(this.element, () => this.#dismiss("scroll"));
       return;
     }
@@ -314,17 +357,17 @@ export class TooltipController extends Controller<HTMLElement> {
     }
   }
 
-  /** Whether the tooltip is currently shown. */
+  /** Current surface visibility, or the retained shown state while its target is absent. */
   get #isVisible(): boolean {
-    return this.hasContentTarget && !this.contentTarget.hidden;
+    return this.#currentContent ? !this.#currentContent.hidden : this.#open;
   }
 
   /**
-   * Whether a hide has something to act on: the content is shown, or the page hid it
-   * while this controller still holds what its reveal took.
+   * Whether a hide has something to act on: the surface is shown, or a shown state
+   * still owns Escape while the page hides or removes its content.
    */
   get #hidable(): boolean {
-    return this.#isVisible || this.#shownContent !== null;
+    return this.#isVisible || this.#open;
   }
   /** Current `showDelay` declaration resolved against its numeric contract. */
   get #safeShowDelay(): number {

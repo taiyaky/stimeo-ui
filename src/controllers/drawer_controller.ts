@@ -42,6 +42,8 @@ type Placement = "left" | "right" | "top" | "bottom";
  * Behavior provided:
  * - {@link DrawerController.open | open}/{@link DrawerController.close | close}
  *   toggle `data-state` and (deferred) `hidden`.
+ * - Panel replacements inherit the controller's held state. While no panel resolves, the
+ *   overlay remains the modal boundary until a panel returns or the drawer is closed.
  * - On open, focus moves to the first focusable element in the panel.
  * - `Tab`/`Shift+Tab` cycle focus within the panel; `Escape` closes.
  * - {@link closeOnBackdrop} closes only when the overlay *itself* is clicked.
@@ -81,11 +83,20 @@ export class DrawerController extends Controller<HTMLElement> {
   #activePanel: HTMLElement | null = null;
   #openState = false;
 
-  /** Owns the modal side effects; Escape closes, focus falls back to the trigger. */
-  readonly #trap = new FocusTrap(() => this.#activePanel ?? this.panelTarget, {
-    onEscape: () => this.#close("escape"),
-    fallbackFocus: () => (this.hasTriggerTarget ? this.triggerTarget : null),
-  });
+  /** Owns modal effects; the overlay holds the trap boundary while no panel resolves. */
+  readonly #trap = new FocusTrap(
+    () =>
+      this.#activePanel ??
+      (this.hasPanelTarget
+        ? this.panelTarget
+        : this.hasOverlayTarget
+          ? this.overlayTarget
+          : this.element),
+    {
+      onEscape: () => this.#close("escape"),
+      fallbackFocus: () => (this.hasTriggerTarget ? this.triggerTarget : null),
+    },
+  );
 
   /** Owns the cancellable close-transition wait and its bounded fallback. */
   readonly #transition = new TransitionCompletion();
@@ -131,7 +142,10 @@ export class DrawerController extends Controller<HTMLElement> {
     this.#connected = true;
     this.#activePanel = this.hasPanelTarget ? this.panelTarget : null;
     this.#reflectPlacement();
-    const shouldOpen = !restored && (this.#isOpen || this.openValue);
+    const startsOpen = this.#activePanel
+      ? this.#activePanel.getAttribute("data-state") === "open"
+      : this.#openState;
+    const shouldOpen = !restored && (startsOpen || this.openValue);
     this.#applyClosedState();
     if (restored) this.openValue = false;
     if (shouldOpen) this.#open("api");
@@ -162,11 +176,10 @@ export class DrawerController extends Controller<HTMLElement> {
    * Gives a panel that no longer resolves as a target its own `data-state`, `hidden` and
    * `data-placement` back — after `disconnect()` too, since dropping the identifier leaves the
    * element on the page. When the owned panel leaves, or a move puts another panel in front
-   * of it, the drawer closes and adopts the panel now first: an open one takes the modal trap
-   * over in place, and otherwise, or with no panel left, the modal side effects are released.
-   * A move that keeps the owned panel first changes nothing. After {@link disconnect} nothing
-   * is adopted: a panel still owned once a handler disconnected the controller only releases
-   * the modal side effects as it leaves.
+   * of it, the controller's open state is retained and applied silently to the panel now first.
+   * If no panel remains, an open drawer keeps its modal lifetime until a replacement arrives
+   * or it is closed. A move that keeps the owned panel first changes nothing. After
+   * {@link disconnect} nothing is adopted because the modal lifetime has already ended.
    */
   panelTargetDisconnected(panel: HTMLElement): void {
     const stays = this.panelTargets.includes(panel);
@@ -175,27 +188,31 @@ export class DrawerController extends Controller<HTMLElement> {
       this.#hiddenLease.return(panel);
       this.#placementLease.return(panel);
     }
-    if (panel !== this.#activePanel || (stays && this.panelTarget === panel)) return;
+    if (!this.#connected || panel !== this.#activePanel || (stays && this.panelTarget === panel))
+      return;
     this.#transition.cancel();
     this.#activePanel = null;
-    if (!this.#connected) {
-      this.#trap.deactivate({ restoreFocus: false });
-      return;
-    }
 
-    this.#openState = false;
     if (stays) {
       this.#writeState(panel, "closed");
       this.#writeHidden(panel, true);
     }
-    this.#writeOverlayState("closed");
-    this.#writeOverlayHidden(true);
-    this.openValue = false;
 
     // Handles morph implementations that add the replacement before removing
     // the old target (its connected callback was intentionally ignored above).
-    if (this.hasPanelTarget) this.#adoptPanel(this.panelTarget);
-    else this.#trap.deactivate();
+    if (this.hasPanelTarget) {
+      this.#adoptPanel(this.panelTarget);
+      return;
+    }
+
+    if (!this.#openState) {
+      this.#writeOverlayState("closed");
+      this.#writeOverlayHidden(true);
+      this.openValue = false;
+      this.#trap.deactivate();
+    } else {
+      this.#trap.refreshContainer();
+    }
   }
 
   /** Reflects the open state onto an overlay that arrives in front of the others. */
@@ -233,26 +250,35 @@ export class DrawerController extends Controller<HTMLElement> {
 
   /** Reveals the drawer, syncs `data-state`, reports a move, then traps focus. */
   #open(reason: StateReason): void {
-    if (!this.hasPanelTarget || this.#isOpen) return;
+    const panel = this.hasPanelTarget ? this.panelTarget : null;
+    if (this.#openState) {
+      if (panel && panel !== this.#activePanel) this.#adoptPanel(panel);
+      return;
+    }
+    if (!panel && !this.hasOverlayTarget) return;
     this.#transition.cancel();
-    this.#activePanel = this.panelTarget;
+    this.#activePanel = panel;
     // Reveal the panel/overlay while they are still in their `data-state="closed"`
     // (off-screen) position, so the browser has a rendered "from" frame.
-    this.#writeHidden(this.panelTarget, false);
+    if (panel) this.#writeHidden(panel, false);
     this.#writeOverlayHidden(false);
     // Force a reflow to commit that closed frame before flipping to "open"; without
     // it the enter transition is skipped (going straight from display:none to the
     // open position paints no intermediate state, so the panel jumps in instead of
     // sliding). The exit transition already works because the panel stays displayed.
-    void this.panelTarget.offsetWidth;
+    void panel?.offsetWidth;
     this.#setState("open");
     this.openValue = true;
     if (this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
     // A subscriber may close it again from the handler above. Everything below
     // applies to an element that is open; run it against a closed one and the
     // side effects have no path back — the later `close()` returns early.
-    if (!this.#isOpen) return;
-    this.#trap.activate();
+    if (!this.#connected || !this.#isOpen) return;
+    if (this.hasPanelTarget && this.panelTarget !== this.#activePanel) {
+      this.#adoptPanel(this.panelTarget);
+    } else {
+      this.#trap.activate();
+    }
   }
 
   /**
@@ -275,13 +301,22 @@ export class DrawerController extends Controller<HTMLElement> {
 
   /** Starts the exit transition, reports a move, then defers `hidden` and teardown. */
   #close(reason: StateReason): void {
-    if (!this.hasPanelTarget || !this.#isOpen) return;
+    if (!this.#openState) return;
+    if (this.hasPanelTarget && this.panelTarget !== this.#activePanel) {
+      this.#adoptPanel(this.panelTarget);
+      if (!this.#connected || !this.#openState) return;
+    }
     this.openValue = false;
     this.#setState("closed");
     if (this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
-    // A subscriber may reopen it from the handler above; hiding after the exit
-    // transition would then apply `hidden` to a drawer that is on screen.
-    if (this.#isOpen) return;
+    // A subscriber can end this modal lifetime by disconnecting or reopen the drawer.
+    if (!this.#connected || this.#isOpen) return;
+    if (!this.hasPanelTarget) {
+      this.#transition.cancel();
+      this.#writeOverlayHidden(true);
+      this.#trap.deactivate();
+      return;
+    }
     this.#hideAfterTransition();
   }
 
@@ -295,15 +330,20 @@ export class DrawerController extends Controller<HTMLElement> {
   }
 
   /**
-   * Reconciles a replacement panel and companion overlay from its explicit DOM state. An open
-   * panel takes the modal trap, moved onto it in place when already active.
+   * Reconciles a replacement panel and companion overlay from the controller's held state.
+   * The active modal trap moves onto the replacement in place when already active.
    */
   #adoptPanel(panel: HTMLElement): void {
     this.#transition.cancel();
+    const previous = this.#activePanel;
+    if (previous && previous !== panel && this.panelTargets.includes(previous)) {
+      this.#writeState(previous, "closed");
+      this.#writeHidden(previous, true);
+    }
     this.#activePanel = panel;
     this.#placementLease.write(panel, this.#placement);
-    if (panel.getAttribute("data-state") === "open") {
-      this.#openState = true;
+    if (this.#openState) {
+      this.#writeState(panel, "open");
       this.#writeHidden(panel, false);
       this.#writeOverlayState("open");
       this.#writeOverlayHidden(false);
@@ -313,7 +353,6 @@ export class DrawerController extends Controller<HTMLElement> {
       return;
     }
 
-    this.#openState = false;
     this.#writeState(panel, "closed");
     this.#writeHidden(panel, true);
     this.#writeOverlayState("closed");
@@ -325,10 +364,13 @@ export class DrawerController extends Controller<HTMLElement> {
   /** Repairs the current panel without restarting its modal lifetime. */
   #repair(): void {
     this.#reflectPlacement();
-    if (!this.hasPanelTarget) return;
-    this.#setState(this.#openState ? "open" : "closed");
+    const state = this.#openState ? "open" : "closed";
     const hidden = !this.#openState && !this.#trap.active;
-    this.#writeHidden(this.panelTarget, hidden);
+    if (this.hasPanelTarget) {
+      this.#writeState(this.panelTarget, state);
+      this.#writeHidden(this.panelTarget, hidden);
+    }
+    this.#writeOverlayState(state);
     this.#writeOverlayHidden(hidden);
   }
 
@@ -397,8 +439,8 @@ export class DrawerController extends Controller<HTMLElement> {
     this.#trap.deactivate();
   }
 
-  /** Whether the drawer is open (tracked via `data-state`, not `hidden`). */
+  /** Whether the drawer is open, retained even while no panel target resolves. */
   get #isOpen(): boolean {
-    return this.hasPanelTarget && this.panelTarget.getAttribute("data-state") === "open";
+    return this.#openState;
   }
 }

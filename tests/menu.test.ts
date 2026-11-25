@@ -575,16 +575,17 @@ describe("MenuController", () => {
       expect(trigger().getAttribute("aria-expanded")).toBe("false");
     });
 
-    it("leaves the Escape stack and reads closed once the only menu leaves", async () => {
+    it("keeps Escape active while the only menu is absent", async () => {
       trigger().click();
       menu().remove();
       await tick();
 
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
-      trigger().focus();
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
       const press = keyEvent("Escape", { bubbles: true, cancelable: true });
-      pressKey(trigger(), press);
-      expect(press.defaultPrevented).toBe(false);
+      pressKey(document.body, press);
+      expect(press.defaultPrevented).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement).toBe(trigger());
     });
 
     it("lets a pending Tab close close the menu that took over", async () => {
@@ -610,17 +611,63 @@ describe("MenuController", () => {
       expect(late.getAttribute("aria-expanded")).toBe("true");
     });
 
-    it("closes a menu that arrives after the only one left, even one authored open", async () => {
+    it("opens a replacement after the opened menu left", async () => {
       controller().open();
-      const late = staleMenu(false);
+      const late = staleMenu(true);
       menu().remove();
       await tick();
 
       root().append(late);
       await tick();
 
-      expect(late.hidden).toBe(true);
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(late.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it.each(["open", "close", "toggle", "Escape"] as const)(
+      "handles %s immediately when a new menu takes over",
+      async (action) => {
+        controller().open();
+        const seen = captureStateEvents("stimeo--menu", undefined, root());
+        const successor = staleMenu(action === "open");
+        menu().replaceWith(successor);
+        if (action === "Escape") pressKey(document.body, "Escape");
+        else controller()[action]();
+
+        const remainsOpen = action === "open";
+        expect(successor.hidden).toBe(!remainsOpen);
+        expect(trigger().getAttribute("aria-expanded")).toBe(String(remainsOpen));
+        expect(seen.names()).toEqual(remainsOpen ? [] : ["close"]);
+        await tick();
+        expect(successor.hidden).toBe(!remainsOpen);
+        seen.stop();
+      },
+    );
+
+    it.each(["ArrowDown", "ArrowUp"] as const)(
+      "focuses a menu replaced by an open subscriber during %s",
+      (key) => {
+        const successor = staleMenu(true);
+        root().addEventListener("stimeo--menu:open", () => menu().replaceWith(successor), {
+          once: true,
+        });
+        pressKey(trigger(), key);
+
+        expect(successor.hidden).toBe(false);
+        const parts = successor.querySelectorAll("[data-stimeo--menu-target='item']");
+        expect(document.activeElement).toBe(
+          key === "ArrowDown" ? parts[0] : parts[parts.length - 1],
+        );
+      },
+    );
+
+    it("does not handle an outside click once the page directly hides the menu", () => {
+      controller().open();
+      menu().setAttribute("hidden", "until-found");
+
+      document.body.click();
+
+      expect(menu().getAttribute("hidden")).toBe("until-found");
     });
 
     it("keeps the menu open when the trigger and the menu are replaced together", async () => {
@@ -653,6 +700,8 @@ describe("MenuController", () => {
       await tick();
 
       expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      const dismissal = pressKey(trigger(), "Escape");
+      expect(dismissal.defaultPrevented).toBe(false);
     });
 
     it("leaves a hidden value the page wrote on the menu alone when another menu arrives behind it", async () => {

@@ -839,7 +839,13 @@ describe("RatingController", () => {
     expect(symbols().every((symbol) => !symbol.hasAttribute("aria-hidden"))).toBe(true);
     expect(
       [root(), ...symbols()].flatMap((element) =>
-        element.getAttributeNames().filter((name) => name.endsWith("-lease")),
+        element
+          .getAttributeNames()
+          .filter(
+            (name) =>
+              name === "data-stimeo--rating-role-lease" ||
+              name === "data-stimeo--rating-aria-hidden-lease",
+          ),
       ),
     ).toEqual([]);
     expect(tabindexes().filter((tabindex) => tabindex === 0)).toHaveLength(1);
@@ -1454,5 +1460,200 @@ describe("RatingController target API", () => {
     instance().preview(element("api-b"));
     expect(element("api-b").hasAttribute("data-rating-hover")).toBe(true);
     expect(instance().valueValue).toBe(1);
+  });
+});
+
+/** Target departure returns borrowed semantics without rewinding the rating content. */
+describe("RatingController symbol ownership", () => {
+  let application: Application | undefined;
+  const element = (id: string): HTMLElement => {
+    const found = document.getElementById(id);
+    if (!found) throw new Error(`Missing rating ownership fixture ${id}`);
+    return found;
+  };
+  const mount = async (authored: boolean): Promise<void> => {
+    document.body.innerHTML = `<form id="rating-form"><div id="rating-host"
+      data-controller="stimeo--rating" data-stimeo--rating-value-value="1"
+      role="radiogroup" aria-label="Rating">
+      ${[1, 2, 3]
+        .map(
+          (n) => `<span id="rating-${n}" role="radio" aria-label="${n} stars"
+        ${authored ? 'aria-checked="false" tabindex="7"' : ""}
+        data-stimeo--rating-target="symbol" data-action="click->stimeo--rating#select"></span>`,
+        )
+        .join("")}
+      <input type="hidden" name="rating" data-stimeo--rating-target="field">
+    </div></form>`;
+    application = Application.start();
+    application.register("stimeo--rating", RatingController);
+    await tick();
+    element("rating-2").click();
+    await tick();
+  };
+  const state = (target: HTMLElement) => [
+    target.getAttribute("aria-checked"),
+    target.getAttribute("tabindex"),
+    target.getAttribute("data-rating-hover"),
+  ];
+  const submitted = () => new FormData(element("rating-form") as HTMLFormElement).get("rating");
+  afterEach(() => {
+    if (application) disconnectAndStopApplication(application);
+    application = undefined;
+    document.body.innerHTML = "";
+  });
+
+  describe.each([false, true])("with authored attributes=%s", (authored) => {
+    it.each(["token", "identifier"] as const)(
+      "returns borrowed attributes on %s departure",
+      async (departure) => {
+        await mount(authored);
+        const target = element("rating-2");
+        expect(state(target)).toEqual(["true", "0", ""]);
+        expect(submitted()).toBe("2");
+        if (departure === "token") target.removeAttribute("data-stimeo--rating-target");
+        else element("rating-host").removeAttribute("data-controller");
+        await tick();
+
+        expect(state(target)).toEqual([authored ? "false" : null, authored ? "7" : null, null]);
+        expect(submitted()).toBe("2");
+        expect(target.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+      },
+    );
+
+    it.each(["token", "identifier"] as const)(
+      "returns cached attributes on %s departure",
+      async (departure) => {
+        await mount(authored);
+        if (!application) throw new Error("Missing rating application");
+        application = await restoreFromCache(application, (restored) =>
+          restored.register("stimeo--rating", RatingController),
+        );
+        const target = element("rating-2");
+        if (departure === "token") target.removeAttribute("data-stimeo--rating-target");
+        else element("rating-host").removeAttribute("data-controller");
+        await tick();
+
+        expect(state(target)).toEqual([authored ? "false" : null, authored ? "7" : null, null]);
+        expect(submitted()).toBe("2");
+        expect(target.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+      },
+    );
+  });
+
+  it("preserves page writes while clearing the departed fill output", async () => {
+    await mount(true);
+    const target = element("rating-2");
+    target.setAttribute("aria-checked", "page");
+    target.setAttribute("tabindex", "9");
+    target.removeAttribute("data-stimeo--rating-target");
+    await tick();
+
+    expect(state(target)).toEqual(["page", "9", null]);
+    expect(submitted()).toBe("2");
+  });
+
+  it.each([false, true])(
+    "keeps selection, fill, and form content while a target moves within the scope, readonly=%s",
+    async (readonly) => {
+      await mount(true);
+      if (readonly) {
+        element("rating-host").setAttribute("data-stimeo--rating-readonly-value", "true");
+        await tick();
+      }
+      const target = element("rating-2");
+      const changes: Event[] = [];
+      for (const name of ["stimeo--rating:change", "stimeo--rating:reconcile", "change"])
+        element("rating-host").addEventListener(name, (event) => changes.push(event));
+      const before = state(target);
+      const writes: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => writes.push(...records));
+      observer.observe(target, {
+        attributes: true,
+        attributeFilter: ["aria-checked", "tabindex", "data-rating-hover"],
+      });
+      const wrapper = document.createElement("span");
+      target.before(wrapper);
+      wrapper.append(target);
+      await tick();
+
+      expect(state(target)).toEqual(before);
+      expect(submitted()).toBe("2");
+      expect(changes).toEqual([]);
+      writes.push(...observer.takeRecords());
+      expect(writes).toEqual([]);
+      observer.disconnect();
+    },
+  );
+
+  it("returns a symbol that leaves the DOM without rewinding the field content", async () => {
+    await mount(true);
+    const target = element("rating-2");
+    target.remove();
+    await tick();
+
+    expect(state(target)).toEqual(["false", "7", null]);
+    expect(submitted()).toBe("2");
+    expect(target.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+    let entry: number | undefined;
+    const observer = new MutationObserver(() => {
+      entry = target.tabIndex;
+    });
+    observer.observe(element("rating-host"), { childList: true });
+    element("rating-host").append(target);
+    await tick();
+    observer.disconnect();
+    expect(entry).toBe(-1);
+    expect(submitted()).toBe("2");
+  });
+
+  it("returns a target token removed while the controller root was detached", async () => {
+    await mount(true);
+    const target = element("rating-2");
+    const host = element("rating-host");
+    host.remove();
+    await tick();
+    target.removeAttribute("data-stimeo--rating-target");
+    element("rating-form").append(host);
+    await tick();
+
+    expect(state(target)).toEqual(["false", "7", null]);
+    expect(submitted()).toBe("2");
+    expect(target.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("returns the Tab stop it took before a newly connected symbol could be painted", async () => {
+    await mount(true);
+    const host = element("rating-host");
+    const controller = application?.getControllerForElementAndIdentifier(host, "stimeo--rating");
+    if (!(controller instanceof RatingController)) throw new Error("Missing rating controller");
+    const symbol = document.createElement("span");
+    symbol.setAttribute("data-stimeo--rating-target", "symbol");
+    symbol.tabIndex = 4;
+    host.append(symbol);
+
+    controller.symbolTargetConnected(symbol);
+    expect(symbol.tabIndex).toBe(-1);
+    controller.disconnect();
+    symbol.removeAttribute("data-stimeo--rating-target");
+    controller.connect();
+
+    expect(symbol.tabIndex).toBe(4);
+    await tick();
+  });
+
+  it("keeps rating attributes and form content during a whole-root detach", async () => {
+    await mount(true);
+    const target = element("rating-2");
+    const host = element("rating-host");
+    const before = state(target);
+    host.remove();
+    await tick();
+
+    expect(state(target)).toEqual(before);
+    expect(host.querySelector<HTMLInputElement>("input")?.value).toBe("2");
+    document.querySelector("form")?.append(host);
+    await tick();
+    expect(state(target)).toEqual(before);
+    expect(submitted()).toBe("2");
   });
 });

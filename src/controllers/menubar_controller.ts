@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { isAriaDisabled } from "../utils/aria_disabled";
 import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { ClickVerdicts } from "../utils/click_verdicts";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { ownerOf, ownersOf } from "../utils/event_owner";
@@ -126,6 +127,12 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * Escape-stack membership are re-derived whenever a top/menu target is added or
  * removed, and whenever `disabled`/`hidden` changes under the menubar.
  *
+ * The top items' `tabindex` and `aria-expanded`, and the menus' `hidden`, are
+ * borrowed while the elements are targets. Losing a target role or the controller
+ * identifier returns the authored value unless the page wrote a different value
+ * meanwhile. Moves within the scope and whole-root detach retain the current
+ * attributes; ownership records preserve authored values across a cache copy.
+ *
  * Each move of a menu's open state is reported: `stimeo--menubar:open` and
  * `stimeo--menubar:close` dispatch
  * `{ reason: StateReason, index: number, menu: HTMLElement }` — `index` is the
@@ -145,8 +152,16 @@ export class MenubarController extends Controller<HTMLElement> {
   declare readonly menuTargets: HTMLElement[];
   declare readonly itemTargets: HTMLButtonElement[];
 
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  readonly #menuHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  readonly #managedTops = new WeakSet<HTMLElement>();
+
   /** Roving tabindex across the top-level menuitems (one Tab stop). */
-  readonly #roving = new RovingTabindex(() => this.topTargets);
+  readonly #roving = new RovingTabindex(
+    () => this.topTargets,
+    (top, value) => this.#writeTabindex(top, value),
+  );
   /** Typeahead query and its idle-reset timer (scoped to the open menu). */
   readonly #typeahead = new Typeahead();
   readonly #timers = new SafeTimeout();
@@ -256,27 +271,25 @@ export class MenubarController extends Controller<HTMLElement> {
    * stops — before the lone stop is re-established.
    */
   topTargetConnected(top: HTMLButtonElement): void {
-    if (!this.#connected) return;
-    top.tabIndex = -1;
+    if (!this.#connected || this.#managedTops.has(top)) return;
+    this.#writeTabindex(top, -1);
     this.#reconcile();
   }
 
-  /**
-   * Removing a top item can strand two things: the Tab stop it held, and the menu
-   * it owned (which nothing could close afterwards).
-   *
-   * The departing element is handed back in a neutral state first. A target can
-   * leave without leaving the document — a morph that only drops the
-   * `data-*-target` token keeps the node — and it would then sit in the page
-   * carrying this controller's `tabindex="0"` (a second Tab stop next to the one
-   * re-established below) and an `aria-expanded="true"` nothing can collapse.
-   * When the node really is gone these writes are harmless no-ops.
-   */
+  /** Returns a departed top's attributes and reconciles the surviving menu pairs. */
   topTargetDisconnected(top: HTMLButtonElement): void {
-    if (!this.#connected) return;
-    top.tabIndex = -1;
-    if (this.#isExpanded(top)) top.setAttribute("aria-expanded", "false");
-    this.#reconcile();
+    if (!this.scope.containsElement(top) || !this.topTargets.includes(top)) {
+      this.#managedTops.delete(top);
+      this.#tabindex.return(top);
+      this.#expanded.return(top);
+    }
+    if (this.#connected) this.#reconcile();
+  }
+
+  /** Records controlled tops so an in-scope move does not initialize them again. */
+  #writeTabindex(top: HTMLElement, value: 0 | -1): void {
+    this.#managedTops.add(top);
+    this.#tabindex.write(top, String(value));
   }
 
   /** See {@link MenubarController.menuTargetDisconnected}. */
@@ -285,19 +298,12 @@ export class MenubarController extends Controller<HTMLElement> {
     this.#reconcile();
   }
 
-  /**
-   * A menu removed while open leaves its owner claiming `aria-expanded="true"` for
-   * a popup that no longer exists, and the menubar holding an Escape layer that
-   * would swallow presses meant for something else.
-   *
-   * As with {@link MenubarController.topTargetDisconnected}, the departing menu is
-   * closed first: a token-only removal leaves a visible popup in the page that no
-   * key and no click can dismiss any more.
-   */
+  /** Returns a departed menu's visibility and reconciles the surviving menu pairs. */
   menuTargetDisconnected(menu: HTMLElement): void {
-    if (!this.#connected) return;
-    if (!menu.hidden) menu.hidden = true;
-    this.#reconcile();
+    if (!this.scope.containsElement(menu) || !this.menuTargets.includes(menu)) {
+      this.#menuHidden.return(menu);
+    }
+    if (this.#connected) this.#reconcile();
   }
 
   /**
@@ -543,8 +549,8 @@ export class MenubarController extends Controller<HTMLElement> {
     // reported from here instead — a reopen of the menu that is already open
     // leaves the state where it was and says nothing.
     this.#closeAllMenus(reason, opener);
-    menu.hidden = false;
-    opener.setAttribute("aria-expanded", "true");
+    this.#menuHidden.write(menu, null);
+    this.#expanded.write(opener, "true");
     if (!was) this.#report("open", opener, menu, reason);
     // A subscriber may close it again from the handler above. The layer and the
     // focus move below belong to a menu that is open; against a hidden one they
@@ -574,8 +580,8 @@ export class MenubarController extends Controller<HTMLElement> {
     const menu = this.#menuFor(top);
     if (!menu) return;
     const was = this.#isExpanded(top);
-    menu.hidden = true;
-    top.setAttribute("aria-expanded", "false");
+    this.#menuHidden.write(menu, "");
+    this.#expanded.write(top, "false");
     if (was && !silent) this.#report("close", top, menu, reason);
     this.#syncEscapeLayer();
   }
@@ -707,14 +713,14 @@ export class MenubarController extends Controller<HTMLElement> {
       // screen with no way back to the element that owns it.
       const own = this.#menuFor(top);
       if (this.#isExpanded(top) && (!own || own.hidden || !this.#isNavigable(top))) {
-        top.setAttribute("aria-expanded", "false");
+        this.#expanded.write(top, "false");
       }
     }
     for (const menu of this.menuTargets) {
       if (menu.hidden) continue;
       // A menu with no expanded owner can never be closed by the user again.
       const owner = this.#topFor(menu);
-      if (!owner || !this.#isExpanded(owner)) menu.hidden = true;
+      if (!owner || !this.#isExpanded(owner)) this.#menuHidden.write(menu, "");
     }
     this.#ensureTabStop();
     this.#rescueFocus();

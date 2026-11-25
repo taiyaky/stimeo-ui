@@ -1,7 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { hasModifierChord, isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
-import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AttributeLease } from "../utils/attribute_lease";
 import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { ownerOf } from "../utils/event_owner";
 import { commitField, writeField } from "../utils/field_mirror";
@@ -110,13 +110,15 @@ export class RadioGroupController extends Controller<HTMLElement> {
   declare readonly fieldTarget: HTMLInputElement;
   declare readonly hasFieldTarget: boolean;
 
-  readonly #roving = new RovingTabindex(() => this.#managedTargets);
+  readonly #checked = new AttributeLease<HTMLElement>("aria-checked", this.identifier);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #roving = new RovingTabindex(
+    () => this.#managedTargets,
+    (radio, value) => this.#writeTabindex(radio, value),
+  );
   readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileDom());
   readonly #handledEvents = new WeakSet<Event>();
   readonly #managedRadios = new Set<HTMLElement>();
-  readonly #originalTabindex = new Map<HTMLElement, string | null>();
-  readonly #ownedChecked = new Map<HTMLElement, string>();
-  readonly #writtenTabindex = new WeakMap<HTMLElement, string | null>();
   readonly #observer = new AuthoredMutationWatcher((records) =>
     this.#handleMutationRecords(records),
   );
@@ -162,6 +164,7 @@ export class RadioGroupController extends Controller<HTMLElement> {
 
   /** Releases every listener, observer, and queued pass while retaining live DOM state. */
   override disconnect(): void {
+    this.#handleMutationRecords(this.#observer.take());
     this.#connectionGeneration += 1;
     this.#connected = false;
     this.#reconcile.disconnect();
@@ -183,8 +186,9 @@ export class RadioGroupController extends Controller<HTMLElement> {
 
   /** Releases target-only attributes and repairs selection, form state, focus, and roving. */
   radioTargetDisconnected(radio: HTMLElement): void {
-    if (!this.#connected) return;
-    if (this.#focusedRadio === radio) {
+    if (this.scope.containsElement(radio) && this.radioTargets.includes(radio)) return;
+    this.#handleMutationRecords(this.#observer.take());
+    if (this.#connected && this.#focusedRadio === radio) {
       // A radio that arrived and left inside one batch is absent from the saved
       // order; `-1` then makes the search start from the top, which is where a
       // group with no position to return to belongs.
@@ -192,8 +196,10 @@ export class RadioGroupController extends Controller<HTMLElement> {
       this.#focusedRadio = null;
     }
     this.#releaseRadio(radio);
-    this.#preferChecked = true;
-    this.#reconcile.schedule();
+    if (this.#connected) {
+      this.#preferChecked = true;
+      this.#reconcile.schedule();
+    }
   }
 
   /** Reflects the current selection into a field added or replaced at runtime. */
@@ -399,32 +405,22 @@ export class RadioGroupController extends Controller<HTMLElement> {
     }
     if (!this.#managedRadios.has(radio)) {
       this.#managedRadios.add(radio);
-      this.#originalTabindex.set(radio, radio.getAttribute("tabindex"));
       if (dropFromTabSequence) this.#writeTabindex(radio, -1);
     }
     this.#normalizeChecked(radio);
   }
 
-  /** Restores only defaults owned while an element belonged to this group. */
+  /** Returns authored attributes when the radio leaves this group's ownership. */
   #releaseRadio(radio: HTMLElement): void {
     this.#managedRadios.delete(radio);
-    const original = this.#originalTabindex.get(radio);
-    if (original !== undefined) this.#writeAttribute(radio, "tabindex", original);
-    this.#originalTabindex.delete(radio);
-    if (this.#ownedChecked.delete(radio)) {
-      this.#writeAttribute(radio, "aria-checked", null);
-    }
+    this.#tabindex.return(radio);
+    this.#checked.return(radio);
   }
 
   /** Supplies a missing checked state and normalizes invalid ARIA tokens. */
   #normalizeChecked(radio: HTMLElement): void {
     const value = radio.getAttribute("aria-checked");
-    if (value === null) {
-      this.#ownedChecked.set(radio, "false");
-      this.#setChecked(radio, false);
-    } else if (value !== "true" && value !== "false") {
-      this.#setChecked(radio, false);
-    }
+    if (value !== "true" && value !== "false") this.#setChecked(radio, false);
   }
 
   /** Makes the first DOM-ordered checked radio the sole checked radio. */
@@ -490,10 +486,6 @@ export class RadioGroupController extends Controller<HTMLElement> {
     const items = this.#managedTargets;
     const index = items.indexOf(radio as HTMLElement);
     this.#roving.setActive(index);
-    for (const item of items) {
-      this.#observer.claimCurrent(item, "tabindex");
-      this.#writtenTabindex.set(item, item.getAttribute("tabindex"));
-    }
     if (focus) radio?.focus();
   }
 
@@ -552,12 +544,11 @@ export class RadioGroupController extends Controller<HTMLElement> {
       const target = record.target as HTMLElement;
       const attribute = record.attributeName;
       if (attribute === "aria-checked") {
-        this.#ownedChecked.delete(target);
+        this.#checked.adopt(target);
         this.#preferChecked = true;
         external = true;
       } else if (attribute === "tabindex") {
-        const value = target.getAttribute(attribute);
-        if (this.#managedRadios.has(target)) this.#originalTabindex.set(target, value);
+        this.#tabindex.adopt(target);
         external = true;
       } else {
         external = true;
@@ -576,16 +567,11 @@ export class RadioGroupController extends Controller<HTMLElement> {
     });
   }
 
-  /** Releases defaults and restores authored tab stops rewritten during a disconnected lifetime. */
+  /** Takes in authored values changed during a disconnected lifetime. */
   #releaseDefaultsRewrittenWhileAway(): void {
-    for (const [radio, written] of this.#ownedChecked) {
-      const current = radio.getAttribute("aria-checked");
-      if (current !== null && current !== written) this.#ownedChecked.delete(radio);
-    }
     for (const radio of this.#managedRadios) {
-      const written = this.#writtenTabindex.get(radio);
-      const current = radio.getAttribute("tabindex");
-      if (current !== written) this.#originalTabindex.set(radio, current);
+      this.#checked.adopt(radio, { ifChanged: true });
+      this.#tabindex.adopt(radio, { ifChanged: true });
     }
   }
 
@@ -618,20 +604,23 @@ export class RadioGroupController extends Controller<HTMLElement> {
   /** Reflects checked state while distinguishing controller writes from authored morphs. */
   #setChecked(radio: HTMLElement, checked: boolean): void {
     const value = checked ? "true" : "false";
-    if (this.#ownedChecked.has(radio)) this.#ownedChecked.set(radio, value);
     this.#writeAttribute(radio, "aria-checked", value);
   }
 
   /** Writes a roving value before the radio is visible to the shared primitive. */
   #writeTabindex(radio: HTMLElement, value: number): void {
     const serialized = String(value);
-    this.#writtenTabindex.set(radio, serialized);
     this.#writeAttribute(radio, "tabindex", serialized);
   }
 
   /** Claims one actual write without hiding pending authored records. */
-  #writeAttribute(target: HTMLElement, name: string, value: string | null): void {
-    setAttributeIfChanged(target, name, value, () => this.#observer.claim(target, name, value));
+  #writeAttribute(
+    target: HTMLElement,
+    name: "aria-checked" | "tabindex",
+    value: string | null,
+  ): void {
+    const lease = name === "aria-checked" ? this.#checked : this.#tabindex;
+    lease.write(target, value, () => this.#observer.claim(target, name, value));
   }
 
   /** Mirrors the selected value or the empty state to the optional hidden field. */

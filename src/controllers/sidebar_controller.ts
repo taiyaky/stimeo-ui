@@ -141,7 +141,7 @@ export class SidebarController extends Controller<HTMLElement> {
   #storageKeyRead: string | null = null;
 
   /** The `aria-expanded` last written, for a trigger that arrives or stays. */
-  #expanded = false;
+  #overlayOpen = false;
   /** The backdrop's `data-state` and `hidden` as last written, for one that arrives or stays. */
   readonly #backdrop: { state: "open" | "closed"; hidden: boolean } = {
     state: "closed",
@@ -180,10 +180,17 @@ export class SidebarController extends Controller<HTMLElement> {
     this.#mql = this.#matchBreakpoint(this.#mqlQuery);
     if (this.#mql) this.#mediaListeners.add(this.#mql, "change", this.#onMediaChange);
     const mode = this.#computeMode();
-    const resume = this.#lived && mode === "overlay" && this.#isOverlayOpen;
+    const startsOpen = this.#activePanel
+      ? this.#activePanel.getAttribute("data-state") === "open"
+      : this.#overlayOpen;
+    const resume = this.#lived && this.#isOverlay && mode === "overlay" && startsOpen;
     this.#lived = true;
-    if (resume) this.#trap.activate();
-    else this.#applyMode(mode, false);
+    if (resume) {
+      this.#overlayOpen = true;
+      this.#trap.activate();
+    } else {
+      this.#applyMode(mode, false);
+    }
     this.#morphRender.observe(this.element);
   }
 
@@ -199,50 +206,24 @@ export class SidebarController extends Controller<HTMLElement> {
   }
 
   /**
-   * Adopts a panel target that arrives while no owned panel is on the page. The owned panel
-   * moving within the element arrives here too, and stays owned as it is.
+   * Applies the retained state to the panel that is now first.
    */
-  panelTargetConnected(panel: HTMLElement): void {
-    if (!this.#connected || this.#activePanel?.isConnected) return;
-    this.#adoptPanel(panel);
+  panelTargetConnected(_panel: HTMLElement): void {
+    this.#adoptPanel();
   }
 
   /**
    * Gives a panel that no longer resolves as a target its own `data-mode`, `data-state` and
    * `hidden` back — after `disconnect()` too, since dropping the identifier leaves the element
-   * on the page. When the owned panel leaves, or a move puts another panel in front of it,
-   * the overlay closes and the panel now first is adopted: an open one takes the modal trap
-   * over in place, and otherwise, or with no panel left, the side effects are released. A
-   * move that keeps the owned panel first changes nothing. After {@link disconnect} nothing
-   * is adopted: a panel still owned once a handler disconnected the controller writes the
-   * overlay closed and releases the modal side effects as it leaves.
+   * on the page. The overlay state is transferred when the first panel changes.
    */
   panelTargetDisconnected(panel: HTMLElement): void {
-    const stays = this.panelTargets.includes(panel);
-    if (!stays) {
+    if (!this.panelTargets.includes(panel)) {
       this.#modeLease.return(panel);
       this.#stateLease.return(panel);
       this.#hiddenLease.return(panel);
     }
-    if (panel !== this.#activePanel || (stays && this.panelTarget === panel)) return;
-    this.#transition.cancel();
-    this.#activePanel = null;
-
-    if (stays) {
-      this.#writeState(panel, "closed");
-      this.#writeHidden(panel, true);
-    }
-    this.#hideBackdrop();
-    this.#setExpandedAttr(false);
-    if (!this.#connected) {
-      this.#trap.deactivate({ restoreFocus: false });
-      return;
-    }
-
-    // Handles morph implementations that add the replacement before removing
-    // the old target (its connected callback was intentionally ignored above).
-    if (this.hasPanelTarget) this.#adoptPanel(this.panelTarget);
-    else this.#trap.deactivate();
+    this.#adoptPanel();
   }
 
   /** Reflects the expanded state onto a trigger that arrives in front of the others. */
@@ -367,6 +348,7 @@ export class SidebarController extends Controller<HTMLElement> {
     this.#mode = mode;
     if (this.hasPanelTarget) this.#modeLease.write(this.panelTarget, mode);
     if (mode === "inline") {
+      this.#overlayOpen = false;
       // Drop any overlay residue, then render the persisted rail state. The connect-time
       // baseline releases nothing: the trap is inactive then, and a tabindex it kept on a
       // panel that held focus is the trap's to keep across an in-page move.
@@ -395,11 +377,11 @@ export class SidebarController extends Controller<HTMLElement> {
     }
     const panel = this.panelTarget;
     this.#modeLease.write(panel, "overlay");
-    this.#setOverlayState(this.#expanded ? "open" : "closed");
-    const hidden = !this.#expanded && !this.#trap.active;
+    this.#setOverlayState(this.#overlayOpen ? "open" : "closed");
+    const hidden = !this.#overlayOpen && !this.#trap.active;
     this.#writeHidden(panel, hidden);
     this.#writeBackdropHidden(hidden);
-    this.#setExpandedAttr(this.#expanded);
+    this.#reflectExpanded();
   }
 
   /** Reports a state the controller re-derived rather than one the user moved. */
@@ -411,35 +393,40 @@ export class SidebarController extends Controller<HTMLElement> {
   }
 
   /**
-   * Reconciles a replacement panel with the current responsive mode and DOM state. An open
-   * overlay panel takes the modal trap, moved onto it in place when already active.
+   * Transfers the retained state to the first panel. An open overlay keeps its place in the
+   * trap and Escape stacks and its opener while the panel is absent. Its backdrop is hidden
+   * until there is a panel to display.
    */
-  #adoptPanel(panel: HTMLElement): void {
+  #adoptPanel(): void {
+    if (!this.#connected) return;
+    const panel = this.hasPanelTarget ? this.panelTarget : null;
+    const previous = this.#activePanel;
+    if (panel === previous) return;
     this.#transition.cancel();
     this.#activePanel = panel;
-    this.#modeLease.write(panel, this.#mode);
+    if (previous && this.#isOverlay && this.panelTargets.includes(previous)) {
+      this.#writeState(previous, "closed");
+      this.#writeHidden(previous, true);
+    }
+    if (panel) this.#modeLease.write(panel, this.#mode);
     if (this.#mode === "inline") {
-      this.#writeHidden(panel, false);
-      this.#writeState(panel, this.#collapsed ? "collapsed" : "expanded");
+      if (panel) this.#writeHidden(panel, false);
       this.#hideBackdrop();
-      this.#setExpandedAttr(!this.#collapsed);
+      this.#applyInlineState(this.#collapsed);
       return;
     }
-
-    if (panel.getAttribute("data-state") === "open") {
-      this.#writeHidden(panel, false);
-      this.#writeBackdropState("open");
-      this.#writeBackdropHidden(false);
-      this.#setExpandedAttr(true);
-      if (this.#trap.active) this.#trap.refreshContainer();
-      else this.#trap.activate();
+    if (this.#isOverlayOpen) {
+      if (panel) {
+        this.#writeHidden(panel, false);
+        this.#setOverlayState("open");
+        this.#writeBackdropHidden(false);
+      } else {
+        this.#hideBackdrop();
+      }
+      this.#trap.refreshContainer();
       return;
     }
-
-    this.#writeState(panel, "closed");
-    this.#writeHidden(panel, true);
-    this.#hideBackdrop();
-    this.#setExpandedAttr(false);
+    this.#setOverlayClosedImmediate();
     this.#trap.deactivate();
   }
 
@@ -473,47 +460,60 @@ export class SidebarController extends Controller<HTMLElement> {
     if (this.hasPanelTarget) {
       this.#writeState(this.panelTarget, collapsed ? "collapsed" : "expanded");
     }
-    this.#setExpandedAttr(!collapsed);
+    this.#reflectExpanded();
   }
 
   // --- Overlay (off-canvas modal) -------------------------------------------
 
   /** Opens the overlay: reveal it, commit a starting frame, then trap focus. */
   #openOverlay(reason: StateReason): void {
-    if (!this.hasPanelTarget || this.#isOverlayOpen) return;
+    this.#adoptPanel();
+    if (this.#isOverlayOpen) return;
     this.#transition.cancel();
-    this.#activePanel = this.panelTarget;
-    this.#writeHidden(this.panelTarget, false);
-    this.#writeBackdropHidden(false);
-    // Commit the closed (off-canvas) frame before flipping to open so the enter
-    // transition has a starting frame to animate.
-    void this.panelTarget.offsetWidth;
-    this.#setOverlayState("open");
-    this.#setExpandedAttr(true);
+    if (this.#activePanel) {
+      this.#writeHidden(this.#activePanel, false);
+      this.#writeBackdropHidden(false);
+      // Commit the off-canvas frame so the enter transition has a starting frame.
+      void this.#activePanel.offsetWidth;
+      this.#setOverlayState("open");
+    }
+    this.#overlayOpen = true;
+    this.#reflectExpanded();
     this.#report(true, reason);
     // A subscriber may close it again from the handler above. Everything below
     // applies to a panel that is open; run it against a closed one and the modal
     // side effects have no path back — the later `close()` returns early.
-    if (!this.#isOverlayOpen) return;
+    if (!this.#connected || !this.#isOverlayOpen) return;
+    this.#adoptPanel();
     this.#trap.activate();
   }
 
   /** Closes the overlay: start the exit transition, defer hide + trap teardown. */
   #closeOverlay(reason: StateReason): void {
-    if (!this.hasPanelTarget || !this.#isOverlayOpen) return;
+    if (!this.#isOverlayOpen) return;
+    this.#adoptPanel();
+    if (!this.#connected || !this.#isOverlayOpen) return;
+    this.#overlayOpen = false;
     this.#setOverlayState("closed");
-    this.#setExpandedAttr(false);
+    this.#reflectExpanded();
     this.#report(false, reason);
     // A subscriber may reopen it from the handler above; hiding after the exit
     // transition would then apply `hidden` to a panel that is on screen.
-    if (this.#isOverlayOpen) return;
-    this.#hideAfterTransition();
+    if (!this.#connected || this.#isOverlayOpen) return;
+    const panel = this.hasPanelTarget ? this.panelTarget : null;
+    if (panel !== this.#activePanel) this.#adoptPanel();
+    else if (panel) this.#hideAfterTransition(panel);
+    else {
+      this.#hideBackdrop();
+      this.#trap.deactivate();
+    }
   }
 
   /** Renders the overlay closed state up front (used when entering overlay mode). */
   #setOverlayClosedImmediate(): void {
+    this.#overlayOpen = false;
     this.#setOverlayState("closed");
-    this.#setExpandedAttr(false);
+    this.#reflectExpanded();
     if (this.hasPanelTarget) this.#writeHidden(this.panelTarget, true);
     this.#hideBackdrop();
   }
@@ -530,9 +530,7 @@ export class SidebarController extends Controller<HTMLElement> {
    * synchronously for 0ms transitions and supplies a bounded fallback when the
    * browser emits no terminal event.
    */
-  #hideAfterTransition(): void {
-    const panel = this.panelTarget;
-    this.#activePanel = panel;
+  #hideAfterTransition(panel: HTMLElement): void {
     this.#transition.wait(panel, () => this.#applyOverlayHidden(panel));
   }
 
@@ -578,15 +576,10 @@ export class SidebarController extends Controller<HTMLElement> {
 
   // --- Shared helpers --------------------------------------------------------
 
-  #setExpandedAttr(expanded: boolean): void {
-    this.#expanded = expanded;
-    this.#reflectExpanded();
-  }
-
-  /** Writes the kept `aria-expanded` onto the first trigger, through its lease. */
+  /** Writes the current mode's `aria-expanded` onto the first trigger, through its lease. */
   #reflectExpanded(): void {
     if (this.hasTriggerTarget) {
-      this.#expandedLease.write(this.triggerTarget, this.#expanded ? "true" : "false");
+      this.#expandedLease.write(this.triggerTarget, this.#isExpanded ? "true" : "false");
     }
   }
 
@@ -654,11 +647,7 @@ export class SidebarController extends Controller<HTMLElement> {
   }
 
   get #isOverlayOpen(): boolean {
-    return (
-      this.#isOverlay &&
-      this.hasPanelTarget &&
-      this.panelTarget.getAttribute("data-state") === "open"
-    );
+    return this.#isOverlay && this.#overlayOpen;
   }
   /** Current `breakpoint` declaration resolved against its numeric contract. */
   get #safeBreakpoint(): number {

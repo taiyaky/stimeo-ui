@@ -83,6 +83,30 @@ describe("EmptyStateController", () => {
     expect(root().getAttribute("data-count")).toBe("2");
   });
 
+  it.each(["markers", "identifier"])("returns visibility on %s removal", async (kind) => {
+    await mount("");
+    const host = root();
+    const items = list();
+    const placeholder = empty();
+    expect(items.hidden).toBe(true);
+    expect(placeholder.hidden).toBe(false);
+
+    if (kind === "markers") {
+      items.removeAttribute("data-stimeo--empty-state-target");
+      placeholder.removeAttribute("data-stimeo--empty-state-target");
+    } else {
+      host.removeAttribute("data-controller");
+    }
+    await tick();
+
+    expect(items.hidden).toBe(false);
+    expect(placeholder.hidden).toBe(true);
+    if (kind === "identifier") {
+      expect(host.hasAttribute("data-count")).toBe(false);
+      expect(host.hasAttribute("data-empty")).toBe(false);
+    }
+  });
+
   it("toggles and emits change when crossing the empty boundary", async () => {
     await mount("");
     const events: Array<{ count: number; empty: boolean }> = [];

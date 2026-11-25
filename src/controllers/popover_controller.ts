@@ -1,10 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
-import { firstTabStop } from "../utils/focus_candidate";
+import { sequentialTabStops } from "../utils/focus_candidate";
 import { ListenerSet } from "../utils/listener_set";
 import { observeScrollDismiss } from "../utils/scroll_dismiss";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
+import { TabindexLoan } from "../utils/tabindex_loan";
 
 /**
  * Headless, accessible **non-modal popover** behavior.
@@ -35,8 +36,8 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *
  * Behavior provided:
  * - Click the trigger to toggle (`aria-expanded` + `hidden` reflect state).
- * - On open, focus moves to the first focusable element inside the panel (or the
- *   panel itself if it has none).
+ * - On open, focus moves to the first sequential stop inside the panel (or the
+ *   panel itself if it has none), including the checked radio of a native group.
  * - `Escape` closes and restores focus to the trigger. While open the panel is a
  *   layer on the shared `EscapeLayer` stack; it claims a press only while
  *   focus is inside the controller or fell to the body (a click on non-focusable
@@ -56,12 +57,16 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *   anchored popups. Closes without restoring focus (like the modeless `focusout` path)
  *   so the close never fights the user's scroll. Off by default. Flipping it while the
  *   panel is open wires or releases the dismissal in place.
- * - The open panel holds its Escape layer and scroll dismissal only while it is in the
- *   DOM: once it leaves (a removal, or a morph that swaps in another panel) both are
- *   released and the trigger reads `aria-expanded="false"`. When the page hides the
- *   panel itself, the next outside click, focus leaving, Escape, dismissing scroll or
- *   `close` releases them the same way; the panel already reads closed, so nothing is
- *   reported.
+ * - The open state survives panel replacements and absence. Actions resolve the first
+ *   current panel before reading visibility; a replacement receives the retained state
+ *   silently, without a focus move. Escape stays held while logically open, including
+ *   without a panel. Scroll dismissal is held only while a panel exists.
+ * - Panel visibility and a fallback `tabindex` are borrowed: a panel leaving the target
+ *   scope receives its authored attributes, preserving later page writes. Same-scope
+ *   moves and whole-root detaches keep them for the next connection.
+ * - When the page hides the current panel itself, the next outside click, focus leaving,
+ *   Escape, dismissing scroll or `close` releases what it held. The panel already reads
+ *   closed, so nothing is reported.
  * - A trigger that takes over — in one task, or after an earlier one leaves in a later
  *   task — reads the open state, and one that stops resolving as the trigger gets back
  *   the `aria-expanded` it carried before this controller wrote on it.
@@ -69,7 +74,7 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *   `stimeo--popover:close` dispatch `{ reason: StateReason }`, after the state
  *   attributes are written. Both are informational, so neither is cancelable. A
  *   call that leaves the state where it already was, the normalization in
- *   {@link connect}, the open panel leaving the DOM, a trigger that takes over, and
+ *   {@link connect}, panel handoff, a trigger that takes over, and
  *   {@link disconnect} are all silent.
  */
 export class PopoverController extends Controller<HTMLElement> {
@@ -94,11 +99,16 @@ export class PopoverController extends Controller<HTMLElement> {
   readonly #escapeLayer = new EscapeLayer();
   /** Borrows `aria-expanded` on the trigger, to give back when an element stops being it. */
   readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
-  /**
-   * The panel this controller opened while the Escape layer and the scroll dismissal are
-   * held for it, or `null` when nothing is held.
-   */
-  #shownPanel: HTMLElement | null = null;
+  /** The logical open state, retained while its panel target is absent. */
+  #openState = false;
+  /** The panel the current state was last reflected onto, including a closed one. */
+  #currentPanel: HTMLElement | null = null;
+  /** The open operation whose continuation may acquire resources and move focus. */
+  #openToken: object | null = null;
+  /** Borrows authored visibility until the panel leaves the target scope. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Makes a panel with no sequential stops programmatically focusable while needed. */
+  readonly #tabindex = new TabindexLoan("-1", this.identifier);
 
   /** Whether `connect()` has run for this connection; target callbacks arrive outside it too. */
   #connected = false;
@@ -111,6 +121,9 @@ export class PopoverController extends Controller<HTMLElement> {
 
   /** Starts closed and registers the standing dismissal listeners. */
   override connect(): void {
+    this.#reporting = false;
+    this.#openState = false;
+    this.#currentPanel = null;
     this.#close("api");
     this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
     this.#listeners.add(this.element, "focusout", this.#onFocusOut);
@@ -130,6 +143,8 @@ export class PopoverController extends Controller<HTMLElement> {
     this.#reporting = false;
     this.#release();
     this.#listeners.dispose();
+    this.#openState = false;
+    this.#currentPanel = null;
   }
 
   /**
@@ -139,23 +154,23 @@ export class PopoverController extends Controller<HTMLElement> {
    * nothing held either.
    */
   closeOnScrollValueChanged(): void {
-    if (this.#shownPanel) this.#syncScrollDismiss();
+    if (this.#openState) this.#syncScrollDismiss();
+  }
+
+  /** Applies the retained state to a newly available first panel target. */
+  panelTargetConnected(): void {
+    if (this.#connected) this.#syncPanel();
   }
 
   /**
-   * Releases what the open panel holds once it leaves the DOM — a removal, or a morph that
-   * swaps in another panel — and writes the closed state onto it and onto the trigger and
-   * any panel that remains. Focus is left where the removal put it. Nothing is dispatched:
-   * target churn is not a state move anyone made. After {@link disconnect}, which already
-   * released everything, this leaves the DOM alone.
+   * Returns attributes when the panel leaves the target scope, including after teardown.
+   * Same-scope moves and whole-root detaches keep them for the next connection.
    */
   panelTargetDisconnected(panel: HTMLElement): void {
-    if (panel !== this.#shownPanel) return;
-    // A panel moved within the element is disconnected and connected again as a target.
-    if (this.panelTargets.includes(panel)) return;
-    this.#release();
-    panel.hidden = true;
-    this.#reflectClosed();
+    if (this.#connected) this.#syncPanel();
+    if (!this.scope.containsElement(panel) || !this.panelTargets.includes(panel)) {
+      this.#returnPanel(panel);
+    }
   }
 
   /** Brings a trigger that arrives after connect to the open state. */
@@ -184,7 +199,7 @@ export class PopoverController extends Controller<HTMLElement> {
 
   /** Opens the panel, reflects state, and moves focus inside it. */
   open(event?: Event): void {
-    this.#open(stateReasonFor(event));
+    this.#reveal(stateReasonFor(event));
   }
 
   /** Closes the panel and reflects the collapsed state. Bound via `data-action`. */
@@ -192,19 +207,21 @@ export class PopoverController extends Controller<HTMLElement> {
     this.#close(stateReasonFor(event));
   }
 
-  /** Opens the panel, reflects state, reports a move, and moves focus inside it. */
-  #open(reason: StateReason): void {
-    if (!this.hasPanelTarget || this.#isOpen) return;
-    const panel = this.panelTarget;
-    panel.hidden = false;
-    if (this.hasTriggerTarget) this.#expanded.write(this.triggerTarget, "true");
-    this.#shownPanel = panel;
+  /** Opens the retained state, reports a move, and focuses the current panel if present. */
+  #reveal(reason: StateReason): void {
+    this.#syncPanel();
+    if (this.#isOpen) return;
+    this.#openState = true;
+    const token = {};
+    this.#openToken = token;
+    this.#reflectPanel(this.#currentPanel, true);
+    this.#reflectTrigger();
     if (this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
-    // A subscriber may close it again or tear the controller down from the handler
-    // above. Everything below applies to a panel that is open and held; run against
-    // a closed one, the Escape layer and scroll dismissal it arms would outlive the
-    // panel, and focus would land inside a hidden one.
-    if (this.#shownPanel !== panel || !this.#isOpen) return;
+    // A subscriber may close, replace or reopen the panel, or tear its controller down.
+    // Only the continuation of the current open may acquire resources and move focus.
+    if (!this.#openState || !this.#reporting) return;
+    this.#syncPanel();
+    if (this.#openToken !== token || !this.#isOpen) return;
     this.#escapeLayer.activate(document, {
       onDismiss: () => this.#closeAndRestore(),
       claims: claimsWhileFocusWithin(this.element),
@@ -213,20 +230,47 @@ export class PopoverController extends Controller<HTMLElement> {
     this.#focusFirst();
   }
 
-  /** Closes the panel, reflects the collapsed state, and reports a move. */
+  /** Closes the current state, reflects it onto the available panel, and reports a move. */
   #close(reason: StateReason): void {
-    // The layer and the scroll dismissal are released whatever the DOM holds now,
-    // so a panel missing from it never keeps them.
+    this.#syncPanel();
     const was = this.#isOpen;
+    this.#openState = false;
     this.#release();
-    this.#reflectClosed();
+    this.#reflectPanel(this.#currentPanel, false);
+    this.#reflectTrigger();
     if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
   }
 
-  /** Writes the closed state onto the trigger and the panel target, where present. */
-  #reflectClosed(): void {
-    if (this.hasPanelTarget) this.panelTarget.hidden = true;
-    if (this.hasTriggerTarget) this.#expanded.write(this.triggerTarget, "false");
+  /** Resolves the first current panel before an action reads visibility. */
+  #syncPanel(): void {
+    const next = this.hasPanelTarget ? this.panelTarget : null;
+    const current = this.#currentPanel;
+    if (current === next) return;
+    if (current) {
+      // Returning visibility can hide a departing panel, so retain its state first.
+      this.#openState = !current.hidden;
+      if (!this.scope.containsElement(current) || !this.panelTargets.includes(current)) {
+        this.#returnPanel(current);
+      } else this.#reflectPanel(current, false);
+    }
+    this.#currentPanel = next;
+    this.#reflectPanel(next, this.#openState);
+    this.#reflectTrigger();
+    if (!this.#openState) this.#release();
+    else this.#syncScrollDismiss();
+  }
+
+  /** Reflects visibility while retaining the panel's authored value. */
+  #reflectPanel(panel: HTMLElement | null, open: boolean): void {
+    if (!panel) return;
+    this.#hidden.write(panel, open ? null : "");
+    if (!open) this.#tabindex.return(panel);
+  }
+
+  /** Gives a departed panel back its authored visibility and borrowed tabindex. */
+  #returnPanel(panel: HTMLElement): void {
+    this.#hidden.return(panel);
+    this.#tabindex.return(panel);
   }
 
   /** Writes whether the panel is open onto the trigger that is first. */
@@ -236,7 +280,7 @@ export class PopoverController extends Controller<HTMLElement> {
 
   /** Leaves the Escape stack and drops the scroll dismissal; nothing is held afterwards. */
   #release(): void {
-    this.#shownPanel = null;
+    this.#openToken = null;
     this.#escapeLayer.deactivate();
     this.#stopScrollDismiss?.();
     this.#stopScrollDismiss = null;
@@ -250,8 +294,10 @@ export class PopoverController extends Controller<HTMLElement> {
    *   what is shown does not depend on it.
    */
   #syncScrollDismiss(): void {
-    if (this.closeOnScrollValue) {
-      this.#stopScrollDismiss ??= observeScrollDismiss(this.element, () => this.#close("scroll"));
+    if (this.closeOnScrollValue && this.#currentPanel && this.#openState) {
+      this.#stopScrollDismiss ??= observeScrollDismiss(this.element, () => {
+        if (this.hasPanelTarget) this.#close("scroll");
+      });
       return;
     }
     this.#stopScrollDismiss?.();
@@ -260,13 +306,15 @@ export class PopoverController extends Controller<HTMLElement> {
 
   /** Moves focus to the first focusable element in the panel, or the panel itself. */
   #focusFirst(): void {
-    const first = firstTabStop(this.panelTarget);
+    const panel = this.#currentPanel;
+    if (!panel) return;
+    const [first] = sequentialTabStops(panel);
     if (first) {
       first.focus();
       return;
     }
-    if (!this.panelTarget.hasAttribute("tabindex")) this.panelTarget.tabIndex = -1;
-    this.panelTarget.focus();
+    this.#tabindex.lend(panel);
+    panel.focus();
   }
 
   /** Closes and restores focus to the trigger for explicit keyboard dismissal. */
@@ -277,6 +325,7 @@ export class PopoverController extends Controller<HTMLElement> {
 
   /** Closes without moving focus when a click lands outside the controller element. */
   readonly #onOutsideClick = (event: MouseEvent): void => {
+    this.#syncPanel();
     const target = event.target;
     if (this.#closable && target instanceof Node && !this.element.contains(target)) {
       this.#close("outside");
@@ -292,6 +341,7 @@ export class PopoverController extends Controller<HTMLElement> {
    * click or known external focus destination decides dismissal instead.
    */
   readonly #onFocusOut = (event: FocusEvent): void => {
+    this.#syncPanel();
     if (!this.#closable) return;
     const next = event.relatedTarget;
     if (!(next instanceof Node) || this.element.contains(next)) return;
@@ -300,6 +350,7 @@ export class PopoverController extends Controller<HTMLElement> {
 
   /** Closes at a known external landing, including after an indeterminate blur to the body. */
   readonly #onDocumentFocusIn = (event: FocusEvent): void => {
+    this.#syncPanel();
     if (!this.#closable) return;
     const target = event.target;
     if (!(target instanceof Node) || target === document.body || this.element.contains(target)) {
@@ -308,16 +359,16 @@ export class PopoverController extends Controller<HTMLElement> {
     this.#close("focus");
   };
 
-  /** Whether the panel is currently visible. */
+  /** Current panel visibility, or the retained state while its target is absent. */
   get #isOpen(): boolean {
-    return this.hasPanelTarget && !this.panelTarget.hidden;
+    return this.#currentPanel ? !this.#currentPanel.hidden : this.#openState;
   }
 
   /**
    * Whether an outside click or focus leaving has something to close: the panel is
-   * open, or the page hid it while this controller still holds what its opening took.
+   * open, or its logical open state still holds Escape after a page hide or removal.
    */
   get #closable(): boolean {
-    return this.#isOpen || this.#shownPanel !== null;
+    return this.#isOpen || this.#openState;
   }
 }

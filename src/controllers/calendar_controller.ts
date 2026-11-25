@@ -1,11 +1,13 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
+import { announce, fillTemplate } from "../utils/announce";
 import {
   gridDirectionElement,
   hasModifierChord,
   isReservedArrowChord,
   logicalArrowKey,
 } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import {
   dateInMonthClamped,
   monthGridDays,
@@ -18,6 +20,7 @@ import {
   toISOMonthString,
 } from "../utils/dates";
 import { commitField, writeField } from "../utils/field_mirror";
+import { intlFormatter } from "../utils/intl_format";
 import { resolveLocale } from "../utils/locale";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
@@ -47,7 +50,8 @@ const OWNED_DISABLED = "owns-disabled";
  * Markup contract (identifier: `stimeo--calendar`):
  *   <div data-controller="stimeo--calendar"
  *        data-stimeo--calendar-month-value="2026-05"
- *        data-stimeo--calendar-selected-value="2026-05-31">
+ *        data-stimeo--calendar-selected-value="2026-05-31"
+ *        data-stimeo--calendar-announce-text-value="Selected date: {date}">
  *     <input type="hidden" name="on" data-stimeo--calendar-target="field" />
  *     <input type="hidden" name="month" data-stimeo--calendar-target="monthField" />
  *     <button data-action="click->stimeo--calendar#prev">Previous</button>
@@ -132,6 +136,9 @@ const OWNED_DISABLED = "owns-disabled";
  * what is still pending for the replaced pick is not sent.
  *
  * @remarks
+ * An optional `announceText` template sends a committed date to a shared
+ * announcer after focus settles. The `{date}` placeholder uses the calendar locale.
+ *
  * Behavior only. The controller updates attributes (`aria-selected`, `data-outside`,
  * `tabindex`, …) and text content on the 42 pre-allocated `day` targets.
  */
@@ -154,6 +161,7 @@ export class CalendarController extends Controller<HTMLElement> {
     max: { type: String, default: "" },
     weekStart: { type: Number, default: 0 }, // 0 = Sunday, 1 = Monday, etc.
     locale: { type: String, default: "" },
+    announceText: { type: String, default: "" },
   };
 
   static valueConstraints = {
@@ -178,6 +186,13 @@ export class CalendarController extends Controller<HTMLElement> {
   declare maxValue: string;
   declare weekStartValue: number;
   declare localeValue: string;
+  declare announceTextValue: string;
+
+  readonly #daySelection = new AttributeLease<HTMLElement>("aria-selected", this.identifier);
+  readonly #dayTabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #dayDate = new AttributeLease<HTMLElement>("data-date", this.identifier);
+  readonly #dayOutside = new AttributeLease<HTMLElement>("data-outside", this.identifier);
+  readonly #dayToday = new AttributeLease<HTMLElement>("data-today", this.identifier);
 
   /** The date currently receiving focus in the grid (local time). */
   focusedDate: Date = new Date();
@@ -288,6 +303,11 @@ export class CalendarController extends Controller<HTMLElement> {
     this.#connected = false;
     this.#repaint.disconnect();
     this.#settleFocus.cancel();
+    if (
+      !(this.element.getAttribute("data-controller") ?? "").split(/\s+/).includes(this.identifier)
+    ) {
+      this.#returnAllDayLeases();
+    }
   }
 
   /**
@@ -304,9 +324,9 @@ export class CalendarController extends Controller<HTMLElement> {
    * Repaints the label when application code changes `locale` at runtime.
    *
    * Stimulus runs this for the initial Value too, before `connect()`. The paint
-   * it triggers is idempotent — the month comes from `month` (or, while that is
-   * still empty, from `focusedDate`) — and a grid that has not connected
-   * reports nothing, so that paint never reports a month.
+   * it triggers is idempotent: it uses `month`, or the retained painted month while
+   * `month` is empty, falling back to `focusedDate` when that request cannot be parsed.
+   * A grid that has not connected reports nothing, so that paint never reports a month.
    */
   localeValueChanged(): void {
     this.#repaintKeepingFocus();
@@ -544,23 +564,23 @@ export class CalendarController extends Controller<HTMLElement> {
         if (kept !== undefined) el.setAttribute("aria-disabled", kept);
       }
       this.#paintedDates.set(el, dateStr);
-      el.setAttribute("data-date", dateStr);
+      this.#dayDate.write(el, dateStr);
       el.textContent = String(date.getDate());
 
       // outside current month
       const isOutside = date.getFullYear() !== year || date.getMonth() !== month - 1;
-      el.setAttribute("data-outside", String(isOutside));
+      this.#dayOutside.write(el, String(isOutside));
 
       // today
       const todayStr = toISODateString(new Date());
-      el.setAttribute("data-today", String(dateStr === todayStr));
+      this.#dayToday.write(el, String(dateStr === todayStr));
 
       // selection state: the day the grid publishes, which a bound can withhold
-      el.setAttribute("aria-selected", String(dateStr === selection));
+      this.#daySelection.write(el, String(dateStr === selection));
 
       // roving tabindex
       const isFocused = toISODateString(this.focusedDate) === dateStr;
-      el.setAttribute("tabindex", isFocused ? "0" : "-1");
+      this.#dayTabindex.write(el, isFocused ? "0" : "-1");
 
       // min/max limits. Only the value this controller wrote comes back off: a
       // consumer marks holidays and booked days with the same attribute, and
@@ -584,7 +604,7 @@ export class CalendarController extends Controller<HTMLElement> {
     if (!dayElements.some((el) => el.getAttribute("tabindex") === "0")) {
       const fallback =
         dayElements.find((el) => el.getAttribute("data-outside") === "false") ?? dayElements[0];
-      fallback?.setAttribute("tabindex", "0");
+      if (fallback) this.#dayTabindex.write(fallback, "0");
     }
 
     // Post-paint, so a listener that re-marks holidays and booked days sees the
@@ -687,6 +707,14 @@ export class CalendarController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
+  /** Returns day attributes only after a target no longer resolves in this grid. */
+  dayTargetDisconnected(day: HTMLElement): void {
+    queueMicrotask(() => {
+      if (this.dayTargets.includes(day)) return;
+      this.#returnDayLeases(day);
+    });
+  }
+
   /** Fills a selected-day field inserted or replaced at runtime with the published selection. */
   fieldTargetConnected(field: HTMLInputElement): void {
     this.#writeField(field, this.#selection);
@@ -712,6 +740,22 @@ export class CalendarController extends Controller<HTMLElement> {
     if (!writeField(field, value)) return false;
     this.#fieldWrites.set(field, (this.#fieldWrites.get(field) ?? 0) + 1);
     return true;
+  }
+
+  #returnDayLeases(day: HTMLElement): void {
+    this.#daySelection.return(day);
+    this.#dayTabindex.return(day);
+    this.#dayDate.return(day);
+    this.#dayOutside.return(day);
+    this.#dayToday.return(day);
+  }
+
+  #returnAllDayLeases(): void {
+    this.#daySelection.returnAll();
+    this.#dayTabindex.returnAll();
+    this.#dayDate.returnAll();
+    this.#dayOutside.returnAll();
+    this.#dayToday.returnAll();
   }
 
   /**
@@ -774,6 +818,26 @@ export class CalendarController extends Controller<HTMLElement> {
     // paint that withheld this one, has had the newer selection reported.
     if (!changed || move !== this.#selectionMoves) return;
     this.dispatch("select", { detail: { date: dateStr, reason } });
+    if (selected && move === this.#selectionMoves && this.#selection === dateStr) {
+      this.#announceSelection(selected);
+    }
+  }
+
+  /**
+   * Announces the committed day once its focus and selection reports have settled.
+   *
+   * @stimeoRuntimeOnly The template words the outgoing announcement.
+   */
+  #announceSelection(date: Date): void {
+    const formatter = intlFormatter(
+      Intl.DateTimeFormat,
+      resolveLocale(this.element, this.localeValue),
+      { dateStyle: "long" },
+      "en",
+    );
+    announce(fillTemplate(this.announceTextValue, { date: formatter.format(date) }), {
+      afterFocus: true,
+    });
   }
 
   #focusAndNavigateToDate(date: Date): void {

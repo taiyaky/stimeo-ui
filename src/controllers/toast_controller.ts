@@ -1,14 +1,16 @@
 import { Controller } from "@hotwired/stimulus";
 import { type ActionSource, actionSource } from "../utils/action_source";
+import { AttributeLease } from "../utils/attribute_lease";
 import { ownerOf } from "../utils/event_owner";
+import { deepActiveElement, firstTabStop, flatTreeContains } from "../utils/focus_candidate";
 import { HoverRecheck } from "../utils/hover_recheck";
 import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
 import { PausableTimers } from "../utils/pausable_timers";
-import { SafeTimeout } from "../utils/safe_timeout";
 import type { StateReason } from "../utils/state_reason";
+import { TabindexLoan } from "../utils/tabindex_loan";
 import { targetSelector } from "../utils/target_selector";
 import { cloneTemplateRoot } from "../utils/template_row";
 import { maxTransitionTotalMs } from "../utils/transition_completion";
@@ -62,6 +64,11 @@ const DELEGATED_EVENTS = ["click", "focusin", "focusout", "keydown", "mouseover"
  * over the limit, and the limit is applied again once hover and focus have both left a
  * toast, or a toast they held leaves the list.
  *
+ * Only the first list owns intake and interaction. Every following list is inert,
+ * even while empty, and keeps its authored contents. A demoted list banks its
+ * toasts' remaining deadlines until it is first again. Focus leaves it before it
+ * becomes inert, and promotion or departure returns the authored inert value.
+ *
  * `dismiss` dispatches `{ item: HTMLElement, reason: StateReason }`.
  *
  * `show` dispatches `{ item: HTMLElement }`.
@@ -88,6 +95,7 @@ export class ToastController extends Controller<HTMLElement> {
   static events = ["dismiss", "show"] as const;
 
   declare readonly listTarget: HTMLElement;
+  declare readonly listTargets: HTMLElement[];
   declare readonly templateTarget: HTMLTemplateElement;
   declare readonly itemTargets: HTMLElement[];
   declare readonly hasListTarget: boolean;
@@ -97,7 +105,7 @@ export class ToastController extends Controller<HTMLElement> {
   declare maxValue: number;
 
   /** Removal timers for the leaving transition; the auto-dismiss ones live below. */
-  #timers = new SafeTimeout();
+  readonly #timers = new PausableTimers<HTMLElement>();
 
   /** Per-toast auto-dismiss, held open while the toast is hovered or focused. */
   readonly #dismiss = new PausableTimers<HTMLElement>();
@@ -107,6 +115,11 @@ export class ToastController extends Controller<HTMLElement> {
 
   /** Toasts reported while they sat outside the first list, left for the list that stays. */
   readonly #outside = new WeakSet<HTMLElement>();
+  /** Already taken toasts whose list temporarily follows the current one. */
+  readonly #suspended = new Set<HTMLElement>();
+  /** Following lists are inactive even while empty, with authored inert retained. */
+  readonly #listInert = new AttributeLease<HTMLElement>("inert", this.identifier);
+  readonly #focusLoan = new TabindexLoan("-1", this.identifier);
 
   /** The phase of each retained toast, independent of its rendered state hook. */
   readonly #phases = new WeakMap<HTMLElement, "entering" | "visible" | "leaving">();
@@ -158,7 +171,8 @@ export class ToastController extends Controller<HTMLElement> {
       if (!current.includes(item)) this.#arrivals.delete(item);
     }
     this.#reapply.observe(this.element);
-    this.#connectDelegatedEvents();
+    this.#focusLoan.reclaim(this.element);
+    this.#settleLists();
     for (const item of this.itemTargets) {
       if (!this.#dismiss.tracks(item) && item.dataset.state !== "leaving") {
         this.#startTimer(item);
@@ -178,6 +192,9 @@ export class ToastController extends Controller<HTMLElement> {
     this.#timers.clearAll();
     this.#dismiss.clearAll();
     this.#taken.clear();
+    this.#suspended.clear();
+    this.#listInert.returnAll();
+    this.#focusLoan.returnAll();
     this.#reapply.disconnect();
     this.#spared = [];
     this.#pointer.dispose();
@@ -189,7 +206,7 @@ export class ToastController extends Controller<HTMLElement> {
 
   /** Keeps delegated interaction on the first list when a list arrives. */
   listTargetConnected(): void {
-    if (this.#delegatedList !== this.listTarget) this.#connectDelegatedEvents();
+    this.#settleLists();
   }
 
   /**
@@ -198,12 +215,10 @@ export class ToastController extends Controller<HTMLElement> {
    * `itemTargetConnected`, which applies the limit.
    */
   listTargetDisconnected(element: HTMLElement): void {
+    if (!this.listTargets.includes(element)) this.#listInert.return(element);
     if (this.#delegatedList === element) this.#disconnectDelegatedEvents();
-    if (!this.#connected || !this.hasListTarget || this.listTarget === element) return;
-    if (this.#delegatedList !== this.listTarget) this.#connectDelegatedEvents();
-    for (const item of this.itemTargets) {
-      if (this.#outside.has(item)) this.#takeIn(item);
-    }
+    if (!this.#connected || (this.hasListTarget && this.listTarget === element)) return;
+    this.#settleLists();
   }
 
   /**
@@ -237,7 +252,7 @@ export class ToastController extends Controller<HTMLElement> {
    */
   #takeIn(element: HTMLElement): boolean {
     if (this.#taken.has(element) || element.dataset.state === "leaving") return false;
-    if (element.parentNode !== this.listTarget) {
+    if (!this.hasListTarget || element.parentNode !== this.listTarget) {
       this.#outside.add(element);
       return false;
     }
@@ -263,6 +278,14 @@ export class ToastController extends Controller<HTMLElement> {
    * holds the move may have ended are read again.
    */
   itemTargetDisconnected(element: HTMLElement): void {
+    if (!this.#taken.has(element)) return;
+    if (
+      this.#suspended.has(element) &&
+      this.itemTargets.includes(element) &&
+      element.parentElement &&
+      this.listTargets.includes(element.parentElement)
+    )
+      return;
     const moved =
       this.#isShown(element) && element.matches(targetSelector(this.identifier, "item"));
     if (moved) {
@@ -270,10 +293,12 @@ export class ToastController extends Controller<HTMLElement> {
       return;
     }
     this.#taken.delete(element);
+    this.#suspended.delete(element);
     this.#phases.delete(element);
     if (this.#connected) this.#arrivals.delete(element);
     element.removeAttribute("data-paused");
     this.#letGo(element);
+    this.#timers.clear(element);
     this.#cancelAnimation(element);
   }
 
@@ -427,6 +452,7 @@ export class ToastController extends Controller<HTMLElement> {
 
   /** Applies the limit again, sparing every toast gathered since the last pass. */
   #reapplyLimit(): void {
+    this.#settleLists();
     for (const item of this.itemTargets) {
       if (!this.#taken.has(item) || !this.hasListTarget || item.parentNode !== this.listTarget)
         continue;
@@ -499,7 +525,12 @@ export class ToastController extends Controller<HTMLElement> {
    * @stimeoRuntimeOnly `duration` is the delay of the one dismissal timer this call arms.
    */
   #startTimer(element: HTMLElement): void {
-    if (element.dataset.state === "leaving" || element.parentNode !== this.listTarget) return;
+    if (
+      element.dataset.state === "leaving" ||
+      !this.hasListTarget ||
+      element.parentNode !== this.listTarget
+    )
+      return;
 
     const armed = this.#safeDuration > 0;
     if (armed) {
@@ -514,21 +545,26 @@ export class ToastController extends Controller<HTMLElement> {
   }
 
   #removeWithTransition(element: HTMLElement, reason: StateReason): void {
-    if (element.dataset.state === "leaving" || element.parentNode !== this.listTarget) return;
+    if (
+      element.dataset.state === "leaving" ||
+      !this.hasListTarget ||
+      element.parentNode !== this.listTarget
+    )
+      return;
 
     this.#letGo(element);
     this.#cancelAnimation(element);
     this.#setPhase(element, "leaving");
 
     const finalize = () => {
-      if (element.parentNode !== this.listTarget) return;
+      if (!this.hasListTarget || element.parentNode !== this.listTarget) return;
       this.listTarget.removeChild(element);
       this.dispatch("dismiss", { detail: { item: element, reason } });
     };
 
-    const duration = maxTransitionTotalMs(window.getComputedStyle(element));
-    if (duration > 0) {
-      this.#timers.set(finalize, duration);
+    const transitionDelay = maxTransitionTotalMs(window.getComputedStyle(element));
+    if (transitionDelay > 0) {
+      this.#timers.set(element, finalize, transitionDelay);
     } else {
       finalize();
     }
@@ -584,13 +620,74 @@ export class ToastController extends Controller<HTMLElement> {
   }
 
   /** Wires stable-container delegation so newly appended items work immediately. */
-  #connectDelegatedEvents(list = this.hasListTarget ? this.listTarget : null): void {
+  #connectDelegatedEvents(list: HTMLElement | null): void {
     this.#disconnectDelegatedEvents();
     if (!list) return;
 
     this.#delegatedList = list;
     for (const type of DELEGATED_EVENTS) {
       this.#listListeners.add(list, type, this.#onListEvent);
+    }
+  }
+
+  /**
+   * Keeps delegation and timers on the first list. A previously current list banks
+   * its deadlines while following another, and a newly promoted list takes in the
+   * toasts it held untouched. Following lists retain their authored contents.
+   */
+  #settleLists(): void {
+    const [current, ...behind] = this.listTargets;
+    if (current) this.#listInert.return(current);
+    if (this.#delegatedList !== (current ?? null)) this.#connectDelegatedEvents(current ?? null);
+    for (const item of this.#taken) {
+      if (item.parentElement === current) continue;
+      const parent = item.parentElement;
+      if (!parent || !behind.includes(parent)) {
+        this.#outside.add(item);
+        this.#taken.delete(item);
+        this.#suspended.delete(item);
+        this.#phases.delete(item);
+        this.#arrivals.delete(item);
+        this.#letGo(item);
+        this.#timers.clear(item);
+        this.#cancelAnimation(item);
+        item.removeAttribute("data-paused");
+        continue;
+      }
+      if (this.#suspended.has(item)) continue;
+      this.#dismiss.pause(item, "list");
+      this.#timers.pause(item, "list");
+      this.#pointer.cancel(item);
+      this.#cancelAnimation(item);
+      this.#suspended.add(item);
+    }
+    for (const list of behind) {
+      if (flatTreeContains(list, deepActiveElement(this.element.ownerDocument))) {
+        const destination = current ? firstTabStop(current) : null;
+        if (destination) destination.focus();
+        else {
+          this.#focusLoan.lend(this.element);
+          this.element.focus();
+        }
+      }
+      this.#listInert.write(list, "");
+    }
+    if (!this.#connected || !current) return;
+    for (const item of this.itemTargets) {
+      if (item.parentElement !== current) continue;
+      if (this.#suspended.delete(item)) {
+        if (!flatTreeContains(item, deepActiveElement(this.element.ownerDocument)))
+          this.#dismiss.resume(item, "focus");
+        this.#dismiss.resume(item, "hover");
+        this.#readHolds(item);
+        this.#dismiss.resume(item, "list");
+        this.#timers.resume(item, "list");
+        const phase = this.#phases.get(item);
+        if (phase === "entering") this.#setPhase(item, "visible");
+        if (this.#dismiss.isHeld(item) && this.#dismiss.tracks(item))
+          item.setAttribute("data-paused", "true");
+        else item.removeAttribute("data-paused");
+      } else if (this.#outside.has(item)) this.#takeIn(item);
     }
   }
 

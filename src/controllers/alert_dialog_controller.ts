@@ -46,6 +46,10 @@ type CancelReason = "user" | "escape";
  *   `stimeo--alert-dialog:confirm`.
  * - {@link cancel} and `Escape` close and dispatch `stimeo--alert-dialog:cancel`
  *   with a `reason` of `"user"` / `"escape"`. Focus returns to the opener.
+ * - Open/closed intent survives a temporary absence of the dialog target, including
+ *   confirm, cancel and Escape during the gap. A successor receives the retained intent
+ *   without changing the trap's modal stack position or opener. Initial markup with no
+ *   dialog target opens nothing.
  * - A Turbo morph that puts the server's `hidden` back on an open dialog, or takes it
  *   off a closed one, is answered by writing the open state back, silently.
  */
@@ -78,6 +82,10 @@ export class AlertDialogController extends Controller<HTMLElement> {
 
   /** Whether target churn is applied: set by `connect()`, cleared first thing in `disconnect()`. */
   #connected = false;
+  /** The logical open state, including while the dialog target is temporarily absent. */
+  #openState = false;
+  /** Whether this connection has had a dialog target; initial missing markup opens nothing. */
+  #seenDialog = false;
   /** The dialog the open state was last applied to. */
   #dialog: HTMLElement | null = null;
   /** Borrows `hidden` on each dialog, to give back when one stops being the target. */
@@ -90,6 +98,8 @@ export class AlertDialogController extends Controller<HTMLElement> {
     this.#trap.connect();
     if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, "");
     this.#dialog = this.hasDialogTarget ? this.dialogTarget : null;
+    this.#seenDialog = this.#dialog !== null;
+    this.#openState = false;
     this.#connected = true;
     this.#morphRender.observe(this.element);
   }
@@ -98,15 +108,16 @@ export class AlertDialogController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#morphRender.disconnect();
     this.#connected = false;
+    this.#openState = false;
     this.#trap.disconnect(this);
   }
 
   /**
-   * Shows the dialog while its trap is active and hides it otherwise, silently: what a Turbo
+   * Shows the dialog while the connection holds an open intent and hides it otherwise: what a Turbo
    * morph that put the server's `hidden` in place of the open state needs.
    */
   #repair(): void {
-    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, this.#trap.active ? null : "");
+    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, this.#openState ? null : "");
   }
 
   /** Applies the open state to a dialog that arrives after connect in front of the others. */
@@ -127,13 +138,16 @@ export class AlertDialogController extends Controller<HTMLElement> {
 
   /** Opens the dialog, traps focus, and locks background scroll. */
   open(): void {
-    if (!this.hasDialogTarget || this.#isOpen) return;
-    this.#hidden.write(this.dialogTarget, null);
+    this.#adoptDialog();
+    if (!this.#connected || !this.#seenDialog || this.#isOpen) return;
+    this.#openState = true;
+    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, null);
     this.#trap.activate();
   }
 
   /** Confirms: closes and dispatches `confirm`. Bound via `data-action`. */
   confirm(): void {
+    this.#adoptDialog();
     if (!this.#isOpen) return;
     this.dispatch("confirm");
     this.#closeDialog();
@@ -146,6 +160,7 @@ export class AlertDialogController extends Controller<HTMLElement> {
 
   /** Shared cancel path used by both the cancel action and the Escape key. */
   #requestCancel(reason: CancelReason): void {
+    this.#adoptDialog();
     if (!this.#isOpen) return;
     this.dispatch("cancel", { detail: { reason } });
     this.#closeDialog();
@@ -153,7 +168,9 @@ export class AlertDialogController extends Controller<HTMLElement> {
 
   /** Hides the dialog and reverts the modal side effects (restoring focus). */
   #closeDialog(): void {
-    this.#hidden.write(this.dialogTarget, "");
+    this.#openState = false;
+    this.#adoptDialog();
+    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, "");
     this.#trap.deactivate();
   }
 
@@ -161,27 +178,27 @@ export class AlertDialogController extends Controller<HTMLElement> {
    * Applies the open state to the dialog that is now first, when that dialog changed. An
    * open dialog moves its modal trap onto it, keeping the trap's place among the page's
    * modals and the opener focus returns to; focus moves inside unless it is already there
-   * or a modal opened over this one takes `Tab`. An open dialog left with no dialog closes
-   * without a decision event.
+   * or a modal opened over this one takes `Tab`. A temporary absence keeps the open intent,
+   * modal stack position, opener and scroll lock, without a decision event.
    */
   #adoptDialog(): void {
     const dialog = this.hasDialogTarget ? this.dialogTarget : null;
-    if (dialog === this.#dialog) return;
+    const previous = this.#dialog;
+    if (dialog === previous) return;
+    if (previous) {
+      if (this.dialogTargets.includes(previous)) this.#hidden.write(previous, "");
+      else this.#hidden.return(previous);
+    }
     this.#dialog = dialog;
-    if (!this.#trap.active) {
-      if (dialog) this.#hidden.write(dialog, "");
-      return;
+    if (dialog) {
+      this.#seenDialog = true;
+      this.#hidden.write(dialog, this.#openState ? null : "");
     }
-    if (!dialog) {
-      this.#trap.deactivate();
-      return;
-    }
-    this.#hidden.write(dialog, null);
-    this.#trap.refreshContainer();
+    if (this.#openState) this.#trap.refreshContainer();
   }
 
-  /** Whether the dialog is currently visible. */
+  /** Whether this connection holds an open intent, even without a dialog target. */
   get #isOpen(): boolean {
-    return this.hasDialogTarget && !this.dialogTarget.hidden;
+    return this.#openState;
   }
 }

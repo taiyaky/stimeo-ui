@@ -99,6 +99,37 @@ describe("StepperController", () => {
       observer.disconnect();
     }
   });
+  it.each(["removed step", "removed button"] as const)(
+    "keeps the current marker after a %s gives its button to the current step",
+    async (departure) => {
+      await start();
+      const [departing] = steps();
+      const [moving, previous] = buttons();
+      const parent = departing?.parentElement;
+      if (!departing || !moving || !previous || !parent) throw new Error("Missing stepper fixture");
+
+      if (departure === "removed step") departing.remove();
+      else {
+        moving.remove();
+        root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      }
+      await tick();
+      expect(moving.hasAttribute("aria-current")).toBe(false);
+
+      previous.replaceWith(moving);
+      const successor = document.createElement("button");
+      successor.type = "button";
+      successor.textContent = "Account";
+      departing.append(successor);
+      parent.append(departing);
+      await tick();
+
+      expect(states()).toEqual(["current", "upcoming", "upcoming"]);
+      expect(moving.getAttribute("aria-current")).toBe("step");
+      expect(successor.hasAttribute("aria-current")).toBe(false);
+    },
+  );
+
   it("renders state for a step whose button is absent", async () => {
     await start();
     steps()[1]?.querySelector("button")?.remove();
@@ -157,8 +188,9 @@ describe("StepperController", () => {
     return step;
   };
   const removeStep = (step: HTMLElement | undefined) => {
-    step?.remove();
-    controller().stepTargetDisconnected();
+    if (!step) throw new Error("Step to remove not found");
+    step.remove();
+    controller().stepTargetDisconnected(step);
   };
   /** Inserts a step ahead of every other step, the way `addStep` appends one. */
   const prependStep = (label: string) => {

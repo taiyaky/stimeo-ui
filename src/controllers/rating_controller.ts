@@ -98,7 +98,14 @@ export class RatingController extends Controller<HTMLElement> {
   declare clearableValue: boolean;
   declare readonlyValue: boolean;
 
-  readonly #roving = new RovingTabindex(() => this.symbolTargets);
+  /** Borrows selection and Tab stops until a symbol leaves the target scope. */
+  readonly #checked = new AttributeLease<HTMLElement>("aria-checked", this.identifier);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #managedSymbols = new Set<HTMLElement>();
+  readonly #roving = new RovingTabindex(
+    () => this.symbolTargets,
+    (symbol, tabindex) => this.#tabindex.write(symbol, String(tabindex)),
+  );
   readonly #rootRole = new AttributeLease<HTMLElement>("role", this.identifier);
   readonly #symbolRole = new AttributeLease<HTMLElement>("role", this.identifier);
   readonly #symbolAriaHidden = new AttributeLease<HTMLElement>("aria-hidden", this.identifier);
@@ -112,6 +119,10 @@ export class RatingController extends Controller<HTMLElement> {
 
   /** Reflects declarative state without announcing an initial user change. */
   override connect(): void {
+    const current = new Set(this.symbolTargets);
+    for (const symbol of this.#managedSymbols) {
+      if (!current.has(symbol)) this.#releaseSymbol(symbol);
+    }
     this.#rootTabindex.reclaim(this.element);
     this.#repaint.observe(this.element);
     this.#shown = this.#normalize(this.#safeValue);
@@ -119,7 +130,10 @@ export class RatingController extends Controller<HTMLElement> {
     this.#connected = true;
   }
 
-  /** Drops a queued reconciliation and hands every borrowed attribute back. */
+  /**
+   * Drops a queued reconciliation and returns the attributes borrowed for readonly mode.
+   * Symbol `aria-checked` and `tabindex` stay leased until those targets leave the scope.
+   */
   override disconnect(): void {
     this.#connected = false;
     this.#repaint.disconnect();
@@ -129,15 +143,29 @@ export class RatingController extends Controller<HTMLElement> {
   /** Removes a runtime-added symbol's authored Tab stop before the batch repaint. */
   symbolTargetConnected(symbol: HTMLElement): void {
     if (this.#connected === false) return;
-    symbol.tabIndex = -1;
+    if (!this.#managedSymbols.has(symbol)) {
+      this.#managedSymbols.add(symbol);
+      this.#tabindex.write(symbol, "-1");
+    }
     this.#repaint.schedule();
   }
 
-  /** Releases readonly ownership and reconciles the remaining DOM-ordered scale. */
+  /** Returns departed symbols while preserving targets moved within the same scope. */
   symbolTargetDisconnected(symbol: HTMLElement): void {
+    if (!this.scope.containsElement(symbol) || !this.symbolTargets.includes(symbol)) {
+      this.#releaseSymbol(symbol);
+    }
+    this.#repaint.schedule();
+  }
+
+  /** Gives back borrowed semantics and drops the symbol's output-only fill marker. */
+  #releaseSymbol(symbol: HTMLElement): void {
+    this.#managedSymbols.delete(symbol);
+    this.#checked.return(symbol);
+    this.#tabindex.return(symbol);
     this.#symbolRole.return(symbol);
     this.#symbolAriaHidden.return(symbol);
-    this.#repaint.schedule();
+    symbol.removeAttribute("data-rating-hover");
   }
 
   /** Reflects into a hidden field added or replaced after connection. */
@@ -294,7 +322,8 @@ export class RatingController extends Controller<HTMLElement> {
   #apply(value: number, { focus }: { focus: boolean }): HTMLInputElement | null {
     const move = this.#move;
     this.symbolTargets.forEach((symbol, index) => {
-      symbol.setAttribute("aria-checked", value > 0 && index + 1 === value ? "true" : "false");
+      this.#managedSymbols.add(symbol);
+      this.#checked.write(symbol, value > 0 && index + 1 === value ? "true" : "false");
     });
 
     const field = this.hasFieldTarget ? this.fieldTarget : null;

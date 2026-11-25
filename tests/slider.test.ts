@@ -298,7 +298,7 @@ describe("SliderController", () => {
     document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 11, bubbles: true }));
   });
 
-  it("dispatches change with the new value on a real change, not at connect or bounds", () => {
+  it("reports each value change once and stays silent at the upper bound", () => {
     const values: number[] = [];
     root().addEventListener("stimeo--slider:change", (e) =>
       values.push((e as CustomEvent).detail.value),
@@ -398,12 +398,12 @@ describe("SliderController", () => {
     expect(thumb().getAttribute("aria-valuenow")).toBe("100");
   });
 
-  it("moves by ten steps on PageDown", () => {
+  it("clamps PageDown at the minimum", () => {
     press("PageDown");
     expect(thumb().getAttribute("aria-valuenow")).toBe("0");
   });
 
-  it("moves by ten steps on PageUp (clamped at max)", () => {
+  it("clamps PageUp at the maximum", () => {
     press("PageUp"); // 40 + 10*10 = 140 → clamped to 100
     expect(thumb().getAttribute("aria-valuenow")).toBe("100");
   });

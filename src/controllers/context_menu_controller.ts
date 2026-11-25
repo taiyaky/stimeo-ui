@@ -89,7 +89,8 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * - A region or a menu that takes over — in one task, or after an earlier one
  *   leaves in a later task — carries the open state, and the menu that takes over
  *   an open one is placed where it was opened; focus stays where the swap left it.
- *   With no menu left the region reads closed and the menu leaves the Escape stack.
+ *   Actions reconcile the first menu before acting. Between menus, the open state,
+ *   position and Escape dismissal are still available.
  *   One that stops resolving as the target gets back the `data-state` or `hidden` it
  *   carried before this controller wrote on it.
  * - Each move of the open state is reported: `stimeo--context-menu:open` and
@@ -131,6 +132,9 @@ export class ContextMenuController extends Controller<HTMLElement> {
   readonly #regionState = new AttributeLease<HTMLElement>("data-state", this.identifier);
   /** The menu the open state was last applied to. */
   #menu: HTMLElement | null = null;
+  /** The open state and position kept while there is no menu. */
+  #openState = false;
+  #position: readonly [string, string] = ["", ""];
 
   /** Whether `connect()` has run for this connection; target callbacks arrive outside it too. */
   #connected = false;
@@ -146,6 +150,7 @@ export class ContextMenuController extends Controller<HTMLElement> {
 
   /** Starts closed and registers delegated activation and outside-pointer listeners. */
   override connect(): void {
+    this.#menu = this.hasMenuTarget ? this.menuTarget : null;
     this.#closeMenu("api");
     this.#listeners.add(this.element, "click", this.#onItemClickCapture, { capture: true });
     this.#listeners.add(document, "click", this.#onOutsidePointer, { capture: true });
@@ -302,63 +307,67 @@ export class ContextMenuController extends Controller<HTMLElement> {
 
   /** Opens the menu at viewport coordinates `(x, y)` and focuses the first item. */
   #openAt(x: number, y: number, reason: StateReason): void {
-    if (!this.hasMenuTarget) return;
     this.#timers.clearAll();
-    const menu = this.menuTarget;
+    this.#adoptMenu();
     const was = this.#isOpen;
+    this.#openState = true;
+    this.#position = [`${x}px`, `${y}px`];
     this.#escapeLayer.activate(document, {
       onDismiss: () => this.#closeAndRestore("escape"),
       claims: claimsWhileFocusWithin(this.element),
     });
-    menu.style.setProperty(ContextMenuController.#COORDINATE[0], `${x}px`);
-    menu.style.setProperty(ContextMenuController.#COORDINATE[1], `${y}px`);
-    this.#menuHidden.write(menu, null);
-    this.#menu = menu;
-    if (this.hasRegionTarget) this.#regionState.write(this.regionTarget, "open");
+    if (this.#menu) this.#showMenu(this.#menu);
+    this.#reflectRegion();
     if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
     // A subscriber may close it again from the handler above; focusing then puts
     // the caret on an item nobody can see.
-    if (!this.#isOpen) return;
+    this.#adoptMenu();
+    if (!this.#menu || !this.#isOpen) return;
     this.#navigableItems[0]?.focus();
   }
 
   /** Hides the menu, reflects the collapsed state on the region, and reports a move. */
   #closeMenu(reason: StateReason): void {
+    this.#adoptMenu();
+    const was = this.#isOpen;
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
-    const menu = this.hasMenuTarget ? this.menuTarget : null;
-    this.#menu = menu;
-    if (!menu) return;
-    const was = this.#isOpen;
-    this.#menuHidden.write(menu, "");
-    if (this.hasRegionTarget) this.#regionState.write(this.regionTarget, "closed");
+    this.#openState = false;
+    if (this.#menu) this.#menuHidden.write(this.#menu, "");
+    this.#reflectRegion();
     if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
   }
 
   /**
-   * Moves the open state onto the menu that is now first, when that menu changed: one that
-   * takes over an open menu is shown where that one was opened, and one that arrives with none
-   * before it arrives closed. With none left, the menu leaves the Escape stack. The region then
-   * reads the menu, changed or not. Focus stays where the swap left it, and nothing is
-   * dispatched.
+   * Transfers the open state and coordinates before an action or observer callback, without
+   * moving focus or emitting events. The state stays available when no menu is present.
    */
   #adoptMenu(): void {
     if (!this.#connected) return;
     const menu = this.hasMenuTarget ? this.menuTarget : null;
     const previous = this.#menu;
-    this.#menu = menu;
-    if (!menu) {
-      this.#escapeLayer.deactivate();
-    } else if (menu !== previous) {
-      const open = previous !== null && !previous.hidden;
-      if (open) {
-        for (const property of ContextMenuController.#COORDINATE) {
-          menu.style.setProperty(property, previous.style.getPropertyValue(property));
-        }
+    if (previous) {
+      this.#openState = !previous.hidden;
+      if (this.#openState && menu !== previous) {
+        const [x, y] = ContextMenuController.#COORDINATE;
+        this.#position = [previous.style.getPropertyValue(x), previous.style.getPropertyValue(y)];
       }
-      this.#menuHidden.write(menu, open ? null : "");
+    }
+    this.#menu = menu;
+    if (!this.#openState) this.#escapeLayer.deactivate();
+    if (menu && menu !== previous) {
+      if (this.#openState) this.#showMenu(menu);
+      else this.#menuHidden.write(menu, "");
     }
     this.#reflectRegion();
+  }
+
+  /** Positions the menu at the coordinates of the most recent opening. */
+  #showMenu(menu: HTMLElement): void {
+    const [x, y] = ContextMenuController.#COORDINATE;
+    menu.style.setProperty(x, this.#position[0]);
+    menu.style.setProperty(y, this.#position[1]);
+    this.#menuHidden.write(menu, null);
   }
 
   /** Writes the open state onto the region that is first. */
@@ -438,6 +447,6 @@ export class ContextMenuController extends Controller<HTMLElement> {
 
   /** Whether the menu is currently visible. */
   get #isOpen(): boolean {
-    return this.hasMenuTarget && !this.menuTarget.hidden;
+    return this.#menu ? !this.#menu.hidden : this.#openState;
   }
 }

@@ -10,13 +10,6 @@ import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link MenubarController}: the APG menubar — roving across
- * top items, opening menus with the keyboard, in-menu navigation/typeahead,
- * jumping to adjacent menus, dismissal on Escape, Tab, outside click or activation,
- * and focus restoration for dismissal paths that request it.
- */
-
 /** One `role="menuitem"` command; `attributes` injects edge-case state (disabled, hidden). */
 const item = (id: string, label: string, attributes = "") => `
   <li role="none">
@@ -73,10 +66,9 @@ const tabStops = () =>
     (element) => element.tabIndex === 0,
   );
 /**
- * Focuses an element and dispatches a bubbling, **cancelable** `keydown` (top item or menu
- * item alike) and returns the event. Cancelable matters: `defaultPrevented` is the
- * only observable proof that the arrow keys suppress the browser's own scrolling,
- * and a non-cancelable event would report `false` no matter what the handler does.
+ * Focuses an element, dispatches a bubbling, cancelable `keydown`, and returns
+ * the event. A cancelable keydown lets the test verify that the handler requests
+ * cancellation of the browser's default action.
  */
 const key = (id: string, k: string): KeyboardEvent => keyboardPress(byId(id), k);
 /**
@@ -95,6 +87,14 @@ const menubarOf = (application: Application): MenubarController => {
   return instance;
 };
 
+/**
+ * Behavioral tests for {@link MenubarController}: the APG menubar — roving across
+ * top items, opening menus with the keyboard, in-menu navigation/typeahead,
+ * jumping to adjacent menus, dismissal on Escape, Tab, outside click or activation,
+ * and focus restoration for dismissal paths that request it. Escape and item
+ * activation restore focus to the owning top item; Tab and outside click dismiss
+ * without restoring it.
+ */
 describe("MenubarController", () => {
   let application: Application;
 
@@ -2428,11 +2428,9 @@ describe("MenubarController under runtime DOM changes", () => {
     expect(document.activeElement).toBe(byId("rt-fresh"));
   });
 
-  it("cleans up a top item that leaves by losing only its target token", async () => {
-    // A morph can drop `data-*-target` without removing the node. Stimulus reports
-    // the disconnect, but the element stays in the page — still carrying this
-    // controller's `tabindex="0"` (a second Tab stop) and an `aria-expanded="true"`
-    // that nothing can collapse any more.
+  it("returns a top item's authored attributes when only its target token leaves", async () => {
+    // A former target keeps the authored button's native Tab stop, while the live
+    // menubar owns its separate roving stop and closes the menu the top leaves.
     byId("rt-file").focus();
     byId("rt-file").click();
     expect(expanded("rt-file")).toBe("true");
@@ -2440,7 +2438,7 @@ describe("MenubarController under runtime DOM changes", () => {
     byId("rt-file").removeAttribute("data-stimeo--menubar-target");
     await tick();
 
-    expect(byId("rt-file").tabIndex).toBe(-1);
+    expect(byId("rt-file").getAttribute("tabindex")).toBeNull();
     expect(expanded("rt-file")).toBe("false");
     expect(menuHidden("rt-m-file")).toBe(true);
     expect(tabStops()).toEqual([byId("rt-edit")]); // exactly one, on a live target
@@ -2524,10 +2522,8 @@ describe("MenubarController under runtime DOM changes", () => {
   });
 
   it("takes Escape ownership for a menu a morph opened in place", async () => {
-    // The DOM is this controller's only source of truth, so a morph that patches
-    // `aria-expanded` and `hidden` directly really has opened the menu — and the
-    // menubar has to be on the Escape stack for it, or the popup cannot be closed
-    // by keyboard at all.
+    // The menubar derives popup visibility from aria-expanded and hidden. An
+    // attribute change that opens the popup also needs to establish Escape ownership.
     byId("rt-file").setAttribute("aria-expanded", "true");
     byId("rt-m-file").hidden = false;
     await tick();
@@ -2583,6 +2579,16 @@ describe("MenubarController under runtime DOM changes", () => {
     expect(menuHidden("rt-m-file")).toBe(true);
     expect(escapeConsumed()).toBe(false);
     expect(tabStops()).toEqual([byId("rt-edit")]);
+  });
+
+  it("preserves the authored hidden value of an already hidden orphaned menu", async () => {
+    const menu = byId("rt-m-file");
+    menu.setAttribute("hidden", "hidden");
+    byId("rt-file").remove();
+    await tick();
+
+    expect(menu.getAttribute("hidden")).toBe("hidden");
+    expect(escapeConsumed()).toBe(false);
   });
 
   it("returns focus to the menubar when the focused top item is removed", async () => {

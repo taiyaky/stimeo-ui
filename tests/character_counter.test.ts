@@ -32,7 +32,7 @@ describe("CharacterCounterController", () => {
     announcementMessages.push((event as CustomEvent<{ message: string }>).detail.message);
   };
 
-  const boot = async (markup: string) => {
+  const boot = async (markup: string, beforeConnect?: () => void) => {
     document.body.innerHTML = `
       <div data-controller="stimeo--announcer">
         <div id="cc-announcer" data-stimeo--announcer-target="polite"
@@ -41,6 +41,7 @@ describe("CharacterCounterController", () => {
              aria-live="assertive" aria-atomic="true"></div>
       </div>
       ${markup}`;
+    beforeConnect?.();
     application = Application.start();
     application.register("stimeo--announcer", AnnouncerController);
     application.register("stimeo--character-counter", CharacterCounterController);
@@ -391,7 +392,7 @@ describe("CharacterCounterController", () => {
   });
 
   /**
-   * Morphs a textarea as Turbo 8 does: the cancelable notice before its value is
+   * Simulates a textarea morph with a cancelable notice before its value is
    * written, the write unless the notice is cancelled, then a bubbling
    * `turbo:morph-element` for the field and one for the root.
    */
@@ -644,7 +645,7 @@ describe("CharacterCounterController", () => {
     expect(reconciles).toEqual([OVER, { length: 2, remaining: 8, over: false }]);
   });
 
-  it("reports nothing from reconnecting a controller element moved while the returning field composes again", async () => {
+  it("reports nothing on a simulated focus-preserving reconnect while the returning field composes again", async () => {
     const { a, changes, reconciles } = await handOffWhileComposing("xxxxxxxxxxxx", true);
     a.value = "abcdef";
     root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
@@ -655,7 +656,7 @@ describe("CharacterCounterController", () => {
     a.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
     c.remove();
 
-    // A move that keeps focus: Stimulus disconnects and connects the controller in one batch.
+    // Simulate a focus-preserving reconnect by calling both lifecycle methods in one turn.
     controller().disconnect();
     controller().connect();
     await vi.advanceTimersByTimeAsync(0);
@@ -894,20 +895,45 @@ describe("CharacterCounterController", () => {
   });
 
   it("renders initial state synchronously without a change event or announcement", async () => {
-    await start(
-      'data-stimeo--character-counter-max-value="10" ' +
-        'data-stimeo--character-counter-announce-text-value="{remaining} remaining"',
-      "",
-      "hello",
-    );
-    const changes = captureChanges();
+    let changes: ChangeDetail[] = [];
+    let reconciles: ChangeDetail[] = [];
+    const initialRenders: string[] = [];
+    const connect = CharacterCounterController.prototype.connect;
+    const spy = vi
+      .spyOn(CharacterCounterController.prototype, "connect")
+      .mockImplementation(function (this: CharacterCounterController) {
+        connect.call(this);
+        initialRenders.push(output().textContent ?? "");
+      });
+    try {
+      await boot(
+        `<div data-controller="stimeo--character-counter"
+              data-stimeo--character-counter-max-value="10"
+              data-stimeo--character-counter-announce-text-value="{remaining} remaining">
+          <textarea data-stimeo--character-counter-target="input"
+                    aria-describedby="cc">hello</textarea>
+          <span id="cc" data-stimeo--character-counter-target="output"></span>
+        </div>`,
+        () => {
+          expect(output().textContent).toBe("");
+          changes = captureChanges();
+          reconciles = captureReconciles();
+        },
+      );
 
-    expect(output().textContent).toBe("5");
-    expect(changes).toEqual([]);
-    expect(announcer().textContent).toBe("");
-    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
-    expect(announcementMessages).toEqual([]);
-    expect(announcer().textContent).toBe("");
+      expect(initialRenders).toEqual(["5"]);
+      expect(output().textContent).toBe("5");
+      expect(changes).toEqual([]);
+      expect(reconciles).toEqual([]);
+      expect(announcer().textContent).toBe("");
+      await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
+      expect(changes).toEqual([]);
+      expect(reconciles).toEqual([]);
+      expect(announcementMessages).toEqual([]);
+      expect(announcer().textContent).toBe("");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("updates visible output immediately and debounces the shared announcement", async () => {
@@ -1264,7 +1290,7 @@ describe("CharacterCounterController", () => {
     field().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
     composeDraft(field(), "abcにほん");
 
-    // A morph renders the server's markup: no count, no state hook.
+    // Model a morph that removes the displayed count and the state hook.
     output().textContent = "";
     root().removeAttribute("data-near-limit");
     root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
@@ -1284,7 +1310,7 @@ describe("CharacterCounterController", () => {
     field().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
     composeDraft(field(), "abcdに");
 
-    // A morph renders the server's markup, which carries neither.
+    // Model a morph that removes both state attributes.
     root().removeAttribute("data-over-limit");
     field().removeAttribute("aria-invalid");
     root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
@@ -1310,7 +1336,7 @@ describe("CharacterCounterController", () => {
     expect(output().textContent).toBe("");
   });
 
-  it("shows the count it showed while the controller element moves keeping focus mid-composition, and counts the commit", async () => {
+  it("keeps the displayed count across a simulated focus-preserving reconnect mid-composition, and counts the commit", async () => {
     await start(
       'data-stimeo--character-counter-max-value="10" ' +
         'data-stimeo--character-counter-warn-at-value="8"',
@@ -1323,8 +1349,8 @@ describe("CharacterCounterController", () => {
     moving.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
     composeDraft(moving, "abcにほん");
 
-    // moveBefore keeps focus and the conversion. Stimulus disconnects the controller
-    // before its targets, and connects it after them.
+    // Simulate a focus-preserving reconnect: disconnect the controller before its
+    // target callbacks, and connect it after them.
     const instance = controller();
     instance.disconnect();
     instance.inputTargetDisconnected(moving);
@@ -1359,7 +1385,7 @@ describe("CharacterCounterController", () => {
       },
     ],
   ])(
-    "reports nothing for a conversion cancelled after %s moved keeping focus",
+    "reports nothing for a conversion cancelled after a simulated focus-preserving reconnect of %s",
     async (_name, move) => {
       await start('data-stimeo--character-counter-max-value="10"', "", "abc");
       const changes = captureChanges();
@@ -1400,7 +1426,7 @@ describe("CharacterCounterController", () => {
       },
     ],
   ])(
-    "holds nothing when %s moved keeping focus, so text left in place is counted with the next key",
+    "holds nothing after a simulated focus-preserving reconnect of %s, so the next key counts text left in place",
     async (_name, move) => {
       await start('data-stimeo--character-counter-max-value="10"', "", "abc");
       const changes = captureChanges();
@@ -1431,7 +1457,7 @@ describe("CharacterCounterController", () => {
     },
   );
 
-  it("compares a cancelled conversion with what it showed before the controller element moved keeping focus", async () => {
+  it("compares a cancelled conversion with the count before a simulated focus-preserving controller reconnect", async () => {
     await start('data-stimeo--character-counter-max-value="10"', "", "abc");
     const changes = captureChanges();
     const reconciles = captureReconciles();
@@ -1462,7 +1488,7 @@ describe("CharacterCounterController", () => {
     ["warnAt", "data-stimeo--character-counter-warn-at-value", "8", "6"],
     ["mode", "data-stimeo--character-counter-mode-value", "used", "4"],
   ])(
-    "holds a pass for a %s that changed with a move keeping focus, as it does with no move",
+    "holds a pass for a %s changed during a simulated focus-preserving reconnect",
     async (_name, attribute, value, count) => {
       await start('data-stimeo--character-counter-max-value="10"', "", "abc");
       const changes = captureChanges();
@@ -1472,7 +1498,7 @@ describe("CharacterCounterController", () => {
       moving.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
       composeDraft(moving, "abcに");
 
-      // The morph that moves the controller element also changes what it counts against.
+      // Change the declaration while simulating a focus-preserving reconnect.
       reconnectKeepingFocus(controller(), () => root().setAttribute(attribute, value));
       await vi.advanceTimersByTimeAsync(0);
       expect(output().textContent).toBe("7");
@@ -1489,7 +1515,7 @@ describe("CharacterCounterController", () => {
 
   it.each([
     [
-      "a morph that changes nothing",
+      "a simulated morph that changes nothing",
       () => root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true })),
     ],
     [
@@ -1521,7 +1547,7 @@ describe("CharacterCounterController", () => {
 
   it.each([
     [
-      "a move of the field keeping focus",
+      "a simulated focus-preserving target reconnect",
       () => {
         const instance = controller();
         instance.inputTargetDisconnected(field());
@@ -1529,7 +1555,7 @@ describe("CharacterCounterController", () => {
       },
     ],
     [
-      "a morph that changes nothing",
+      "a simulated morph that changes nothing",
       () => root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true })),
     ],
   ])(
@@ -1686,7 +1712,7 @@ describe("CharacterCounterController", () => {
     expect(reconciles).toEqual([{ length: 2, remaining: 18, over: false }]);
   });
 
-  it("holds nothing when a move keeping focus changes nothing, with Values left at their defaults", async () => {
+  it("holds nothing on a simulated focus-preserving reconnect with unchanged Values", async () => {
     await start('data-stimeo--character-counter-max-value="10"', "", "abc");
     const changes = captureChanges();
     const reconciles = captureReconciles();
@@ -1704,7 +1730,7 @@ describe("CharacterCounterController", () => {
     expect(reconciles).toEqual([]);
   });
 
-  it("counts the field that comes first with a move at once, leaving the conversion behind it", async () => {
+  it("counts a new first field after a simulated reconnect, leaving the conversion behind it", async () => {
     await start('data-stimeo--character-counter-max-value="10"', "", "abc");
     const reconciles = captureReconciles();
     const moving = field();
@@ -1775,7 +1801,7 @@ describe("CharacterCounterController", () => {
     root().setAttribute("data-stimeo--character-counter-max-value", "20");
     await vi.advanceTimersByTimeAsync(0);
 
-    // The identifier is dropped while the field keeps focus: nothing connects again.
+    // Disconnect the instance directly while the field still has focus.
     controller().disconnect();
     await vi.advanceTimersByTimeAsync(0);
     field().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
@@ -1787,7 +1813,7 @@ describe("CharacterCounterController", () => {
     expect(reconciles).toEqual([]);
   });
 
-  it("writes nothing once disconnected, when the field it counted lost its target and the turn lets its composition go", async () => {
+  it("keeps the displayed count when the composing field loses its target and the controller disconnects in the same turn", async () => {
     await start('data-stimeo--character-counter-max-value="10"', "", "abc");
     const composing = field();
     composing.focus();
@@ -2383,7 +2409,7 @@ describe("CharacterCounterController", () => {
     expect(speech).toEqual(["5 characters remaining"]);
   });
 
-  it("has no a11y violations without turning the visible output into a live region", async () => {
+  it("has no machine-detectable a11y violations and leaves aria-live off the visible output", async () => {
     vi.useRealTimers();
     document.body.innerHTML = `
       <div data-controller="stimeo--announcer">

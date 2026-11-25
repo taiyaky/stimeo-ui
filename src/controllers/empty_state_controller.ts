@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
+import { AttributeLease } from "../utils/attribute_lease";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 
 /**
@@ -33,13 +34,10 @@ import { MorphRenderWatcher } from "../utils/morph_render_watcher";
  * (Turbo navigation included). `announceText` / `announceFilledText` are read at
  * the crossing and handed to the page's announcer.
  *
- * Ownership note: this controller deliberately owns `hidden` on the `list` / `empty`
- * targets as its single source of truth for which one is shown, rather than only
- * emitting `data-empty` and delegating visibility to consumer CSS. The toggle is
- * unconditional (set every sync), so there is nothing to save/restore and no
- * authored `hidden` to preserve — the displayed half is always a pure function of
- * the item count. Consumers wanting CSS-driven visibility should not also set
- * `hidden` on these targets themselves.
+ * Visibility of the current `list` and `empty` targets follows the item count.
+ * Their authored `hidden` is returned when the target declaration or controller
+ * identifier leaves. The whole component can be removed with its state intact
+ * for a cache restore.
  */
 export class EmptyStateController extends Controller<HTMLElement> {
   static override targets = ["list", "empty"];
@@ -51,7 +49,9 @@ export class EmptyStateController extends Controller<HTMLElement> {
   static events = ["change"] as const;
 
   declare readonly listTarget: HTMLElement;
+  declare readonly listTargets: HTMLElement[];
   declare readonly emptyTarget: HTMLElement;
+  declare readonly emptyTargets: HTMLElement[];
   declare readonly hasListTarget: boolean;
   declare readonly hasEmptyTarget: boolean;
 
@@ -65,6 +65,7 @@ export class EmptyStateController extends Controller<HTMLElement> {
   /** Last applied empty state; `null` until the first sync so connect emits nothing. */
   #empty: boolean | null = null;
 
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
   readonly #morphRender = new MorphRenderWatcher(() => this.#resync());
 
   override connect(): void {
@@ -78,6 +79,10 @@ export class EmptyStateController extends Controller<HTMLElement> {
     this.#morphRender.disconnect();
     this.#connected = false;
     this.#stopObserving();
+    if (!this.scope.containsElement(this.element)) {
+      this.element.removeAttribute("data-count");
+      this.element.removeAttribute("data-empty");
+    }
   }
 
   /** Follows a `list` element swapped in at runtime (Turbo Stream `replace` / morph). */
@@ -86,7 +91,9 @@ export class EmptyStateController extends Controller<HTMLElement> {
   }
 
   /** Releases the observation when the `list` element leaves the target set. */
-  listTargetDisconnected(): void {
+  listTargetDisconnected(element: HTMLElement): void {
+    if (!this.scope.containsElement(element) || !this.listTargets.includes(element))
+      this.#hidden.return(element);
     this.#resync();
   }
 
@@ -102,7 +109,9 @@ export class EmptyStateController extends Controller<HTMLElement> {
    * Stream `after` / `before` / `append` followed by `remove`) leaves the
    * replacement untouched until the original goes — this callback is that moment.
    */
-  emptyTargetDisconnected(): void {
+  emptyTargetDisconnected(element: HTMLElement): void {
+    if (!this.scope.containsElement(element) || !this.emptyTargets.includes(element))
+      this.#hidden.return(element);
     this.#resync();
   }
 
@@ -207,8 +216,8 @@ export class EmptyStateController extends Controller<HTMLElement> {
     } else {
       this.element.removeAttribute("data-empty");
     }
-    this.listTarget.hidden = empty;
-    if (this.hasEmptyTarget) this.emptyTarget.hidden = !empty;
+    this.#hidden.write(this.listTarget, empty ? "" : null);
+    if (this.hasEmptyTarget) this.#hidden.write(this.emptyTarget, empty ? null : "");
     return count;
   }
 

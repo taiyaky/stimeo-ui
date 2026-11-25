@@ -1,7 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { hasModifierChord, isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
-import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AttributeLease } from "../utils/attribute_lease";
 import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { ownerOf } from "../utils/event_owner";
 import { commitField, writeFields } from "../utils/field_mirror";
@@ -17,6 +17,7 @@ import { targetSelector } from "../utils/target_selector";
 /** Item attributes whose retained-element changes can alter this controller's contract. */
 const ITEM_ATTRIBUTES = [
   "aria-pressed",
+  "tabindex",
   "data-value",
   "disabled",
   "hidden",
@@ -75,8 +76,9 @@ const ITEM_ATTRIBUTES = [
  *   `ArrowLeft`/`ArrowUp` to the previous (wrapping); `Home`/`End` to the
  *   first/last. Native-disabled and hidden items are skipped. ARIA-disabled
  *   items remain discoverable in the roving order but cannot be activated.
- * - `stimeo--toggle-group:change` is dispatched only for user activation. Its
- *   detail is `{ value: string, pressed: boolean, values: string[], reason: StateReason }`, where
+ * - `stimeo--toggle-group:change` is dispatched when a user activation or an explicit
+ *   `toggle()` call changes the published pressed set. Its detail is
+ *   `{ value: string, pressed: boolean, values: string[], reason: StateReason }`, where
  *   `values` is the DOM-ordered value list of every item left pressed. A press
  *   that a listener of its native `change` replaces with a press of its own
  *   dispatches no `change`: the newer press reports itself, so every `change`
@@ -116,11 +118,14 @@ export class ToggleGroupController extends Controller<HTMLElement> {
   declare nameValue: string;
   declare formValue: string;
 
-  readonly #roving = new RovingTabindex(() => this.#managedTargets);
+  readonly #pressed = new AttributeLease<HTMLElement>("aria-pressed", this.identifier);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #roving = new RovingTabindex(
+    () => this.#managedTargets,
+    (item, value) => this.#writeAttribute(item, "tabindex", String(value)),
+  );
   readonly #handledEvents = new WeakSet<Event>();
   readonly #managedItems = new Set<HTMLElement>();
-  readonly #originalTabindex = new WeakMap<HTMLElement, string | null>();
-  readonly #ownedPressed = new Map<HTMLElement, string>();
   /** One pass per batch of item, Value, and retained-element changes. */
   readonly #pass = new MorphRenderWatcher(() => this.#reconcileDom());
   readonly #observer = new AuthoredMutationWatcher((records) => {
@@ -176,6 +181,7 @@ export class ToggleGroupController extends Controller<HTMLElement> {
    * retaining DOM state for Turbo cache/reconnect.
    */
   override disconnect(): void {
+    this.#releaseAuthoredPressed(this.#observer.take());
     this.#connectionGeneration += 1;
     this.#connected = false;
     this.#pass.disconnect();
@@ -192,9 +198,10 @@ export class ToggleGroupController extends Controller<HTMLElement> {
 
   /** Restores attributes owned only while an element is an item, then reconciles the batch. */
   itemTargetDisconnected(item: HTMLElement): void {
-    if (!this.#connected) return;
+    if (this.scope.containsElement(item) && this.itemTargets.includes(item)) return;
+    this.#releaseAuthoredPressed(this.#observer.take());
     this.#releaseItem(item);
-    this.#pass.schedule();
+    if (this.#connected) this.#pass.schedule();
   }
 
   /** Reconciles the single-selection invariant when the Stimulus Value changes. */
@@ -319,8 +326,8 @@ export class ToggleGroupController extends Controller<HTMLElement> {
   }
 
   /**
-   * Applies one user toggle and dispatches the documented change detail. The set
-   * it leaves is taken as published before either report goes out, so a
+   * Applies one accepted toggle and reports a changed published pressed set. The
+   * set it leaves is taken as published before either report goes out, so a
    * listener that presses again or writes `aria-pressed` is measured from it. A
    * listener of the native `change` that presses again has had that newer press
    * reported, so this press's `change` would describe a set that is gone and is
@@ -405,30 +412,22 @@ export class ToggleGroupController extends Controller<HTMLElement> {
     }
     if (!this.#managedItems.has(item)) {
       this.#managedItems.add(item);
-      this.#originalTabindex.set(item, item.getAttribute("tabindex"));
-      if (dropFromTabSequence) item.tabIndex = -1;
+      if (dropFromTabSequence) this.#writeAttribute(item, "tabindex", "-1");
     }
     this.#normalizePressed(item);
   }
 
-  /** Restores only defaults owned because an element belonged to this group. */
+  /** Returns authored attributes when the item leaves this group's ownership. */
   #releaseItem(item: HTMLElement): void {
-    if (!this.#managedItems.delete(item)) return;
-    const original = this.#originalTabindex.get(item);
-    if (original === null) item.removeAttribute("tabindex");
-    else if (original !== undefined) item.setAttribute("tabindex", original);
-    if (this.#ownedPressed.delete(item)) this.#writePressed(item, null);
+    this.#managedItems.delete(item);
+    this.#tabindex.return(item);
+    this.#pressed.return(item);
   }
 
   /** Supplies a missing pressed state and normalizes invalid ARIA tokens. */
   #normalizePressed(item: HTMLElement): void {
     const value = item.getAttribute("aria-pressed");
-    if (value === null) {
-      this.#ownedPressed.set(item, "false");
-      this.#writePressed(item, "false");
-    } else if (value !== "true" && value !== "false") {
-      this.#writePressed(item, "false");
-    }
+    if (value !== "true" && value !== "false") this.#writePressed(item, "false");
   }
 
   /**
@@ -531,15 +530,12 @@ export class ToggleGroupController extends Controller<HTMLElement> {
     return false;
   }
 
-  /** Releases default ownership when a Turbo morph authors `aria-pressed`. */
+  /** Takes in attribute writes the page made while observation stayed active. */
   #releaseAuthoredPressed(records: MutationRecord[]): void {
     for (const record of records) {
-      if (record.attributeName !== "aria-pressed") continue;
       const item = record.target as HTMLElement;
-      const value = item.getAttribute("aria-pressed");
-      if (value !== null) {
-        this.#ownedPressed.delete(item);
-      }
+      if (record.attributeName === "aria-pressed") this.#pressed.adopt(item);
+      else if (record.attributeName === "tabindex") this.#tabindex.adopt(item);
     }
   }
 
@@ -553,11 +549,11 @@ export class ToggleGroupController extends Controller<HTMLElement> {
     });
   }
 
-  /** Gives back pressed defaults that the page rewrote while observation was disconnected. */
+  /** Takes in authored values changed during a disconnected lifetime. */
   #releaseDefaultsRewrittenWhileAway(): void {
-    for (const [item, written] of this.#ownedPressed) {
-      const current = item.getAttribute("aria-pressed");
-      if (current !== null && current !== written) this.#ownedPressed.delete(item);
+    for (const item of this.#managedItems) {
+      this.#pressed.adopt(item, { ifChanged: true });
+      this.#tabindex.adopt(item, { ifChanged: true });
     }
   }
 
@@ -579,7 +575,6 @@ export class ToggleGroupController extends Controller<HTMLElement> {
   /** Reflects pressed state while distinguishing controller writes from authored morphs. */
   #setPressed(item: HTMLElement, pressed: boolean): void {
     const value = pressed ? "true" : "false";
-    if (this.#ownedPressed.has(item)) this.#ownedPressed.set(item, value);
     this.#writePressed(item, value);
   }
 
@@ -594,10 +589,18 @@ export class ToggleGroupController extends Controller<HTMLElement> {
   #itemValue(item: HTMLElement): string {
     return item.getAttribute("data-value") ?? "";
   }
-  /** Claims every actual pressed write, including default repair and release. */
+  /** Writes the pressed state through its attribute lease. */
   #writePressed(item: HTMLElement, value: string | null): void {
-    setAttributeIfChanged(item, "aria-pressed", value, () =>
-      this.#observer.claim(item, "aria-pressed", value),
-    );
+    this.#writeAttribute(item, "aria-pressed", value);
+  }
+
+  /** Claims only an actual leased write that still carries the requested value. */
+  #writeAttribute(
+    item: HTMLElement,
+    name: "aria-pressed" | "tabindex",
+    value: string | null,
+  ): void {
+    const lease = name === "aria-pressed" ? this.#pressed : this.#tabindex;
+    lease.write(item, value, () => this.#observer.claim(item, name, value));
   }
 }

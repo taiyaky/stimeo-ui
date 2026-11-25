@@ -40,6 +40,7 @@
  * ```
  */
 
+import type { AttributeLease } from "./attribute_lease";
 import { setAttributeIfChanged } from "./attribute_write";
 
 /**
@@ -55,16 +56,24 @@ import { setAttributeIfChanged } from "./attribute_write";
  *
  * @param options - every option in the set, visible or not
  * @param active - the one option to mark active, or `null` to clear
+ * @param lease - saves the author value for options borrowed by a controller
  * @returns how many attributes were actually written
  */
 export function syncActiveOption(
   options: Iterable<HTMLElement>,
   active: HTMLElement | null,
+  lease?: AttributeLease<HTMLElement>,
 ): number {
   let written = 0;
   for (const option of options) {
     const next = option === active ? "true" : "false";
-    if (setAttributeIfChanged(option, "aria-selected", next)) written += 1;
+    if (lease) {
+      if (option.getAttribute("aria-selected") === next) continue;
+      lease.adopt(option, { ifChanged: true });
+      lease.write(option, next, () => {
+        written += 1;
+      });
+    } else if (setAttributeIfChanged(option, "aria-selected", next)) written += 1;
   }
   return written;
 }

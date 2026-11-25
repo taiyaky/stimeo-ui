@@ -6,6 +6,7 @@ export interface CompositionSignal {
 /** Minimal `input` shape needed to tell a composition echo from a fresh edit. */
 export interface ConfirmedInputSignal {
   readonly target: EventTarget | null;
+  readonly isTrusted: boolean;
   readonly inputType?: string;
 }
 
@@ -49,15 +50,15 @@ export interface CompositionTrackerOptions {
    * `stimeo--otp` returns a residual its `pattern` rejects to the prior character: it reports
    * that as a reconciliation, never as the user's edit, and keeps the selection.
    *
-   * When the tracker sees the end in an event it hears — a key, an edit, a focus
-   * change, the next `compositionstart` — the hook runs there, in the capture phase,
-   * ahead of that event's own handlers and of the edit it announces, whoever
-   * dispatched it. When a question ({@link CompositionTracker.isComposing},
+   * When the tracker sees the end in a key, edit or focus event it hears, the hook
+   * runs in its capture listener before consumer bubble handlers, whoever dispatched
+   * the event. When a question ({@link CompositionTracker.isComposing},
    * {@link CompositionTracker.composingElement}) or a Turbo morph notice shows
    * the end, the hook runs in a microtask after them, never inside
    * its caller or a half-applied morph, unless an event the tracker hears comes
-   * first. On `compositionstart` it runs after the new composition is set and before
-   * `onStart`: {@link CompositionTracker.isComposing} is true again, so work held for
+   * first. The `compositionstart` listener does not use capture: it runs the hook
+   * after setting the new composition and before `onStart`:
+   * {@link CompositionTracker.isComposing} is true again, so work held for
    * the old composition stays held for the new.
    */
   readonly onAbandon?: (element: EventTarget, inPlace: boolean) => void;
@@ -195,15 +196,13 @@ const holdsFocus = (element: EventTarget): boolean =>
  * confirmation twice, so {@link CompositionTracker.consumesConfirmedInput} tells
  * the echo apart and the consumer returns early on it.
  *
- * **What the echo is not, is the harder half.** Not every engine sends one —
- * Chromium ends a confirmation at `compositionend` with no `input` after it — so
- * a window that waits for the echo and only closes on the next key would swallow
- * the first edit that arrives without one: dictation, autofill, a drop,
- * `insertText`. Two things keep that from happening. The window closes on the
- * next anything — a key, a new composition, any `input`, losing the field — and
- * an `input` that reports an `inputType` outside {@link COMPOSITION_INPUT_TYPES}
- * is an edit, so it is never folded. Only an engine that reports no `inputType`
- * at all is left relying on the window alone.
+ * The first `input` a consumer checks after `compositionend` can echo the
+ * confirmation if it targets the same field and either reports a composition
+ * `inputType` or is trusted and reports no kind. A plain `input` dispatched by
+ * the page, or an `input` reporting an ordinary edit kind, is handled as an
+ * edit. The check closes the window regardless of its result. A keydown on
+ * an observed target, a new composition, unobserving the confirmed field itself,
+ * or disconnecting also closes it. Blur alone leaves it open.
  *
  * **A composition can also end without `compositionend`.** Chromium drops the
  * conversion silently when something other than the IME changes its field's value,
@@ -409,10 +408,8 @@ export class CompositionTracker {
     const confirmed = this.#confirmedTarget;
     this.#confirmedTarget = null;
     if (confirmed === null || confirmed !== event.target) return false;
-    // An engine that reports no kind at all leaves `inputType` empty, and the
-    // window is then the only signal there is.
     const inputType = event.inputType;
-    return !inputType || isCompositionInputType(inputType);
+    return inputType ? isCompositionInputType(inputType) : event.isTrusted === true;
   }
 
   /** Removes every listener {@link CompositionTracker.observe} added to `target`. */

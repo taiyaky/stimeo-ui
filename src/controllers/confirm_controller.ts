@@ -51,8 +51,8 @@ interface Wording {
  * side effects. A prompt asked while the controller is disconnected, including one a
  * `resolve` subscriber asks while `disconnect()` settles the pending prompt, settles
  * `false` at once without opening the dialog or dispatching either event.
- * A pending prompt carries its trap and its text onto a dialog, message or button that
- * replaces the current one, and settles `false` when no dialog is left to answer it.
+ * A pending prompt keeps its text and decision while a dialog is absent, and applies
+ * them to a successor. Disconnecting the controller still cancels the prompt.
  *
  * @remarks
  * Behavior only — the dialog's a11y (focus trap, restore, roles) is delegated to
@@ -251,13 +251,13 @@ export class ConfirmController extends Controller<HTMLElement> {
   #prompt(message: string): Promise<boolean> {
     // A controller that is not connected asks nothing: no dialog, no events, cancelled.
     if (!this.#connected) return Promise.resolve(false);
-    if (!this.hasDialogTarget) return Promise.resolve(window.confirm(message));
     const asked = ++this.#asked;
     // A second prompt while one is open cancels the first to keep a single dialog.
     this.#resolve(false);
     // A `resolve` subscriber of the cancelled prompt may have asked a newer one, which
     // now owns the dialog; this prompt settles cancelled without opening.
-    if (asked !== this.#asked) return Promise.resolve(false);
+    if (!this.#connected || asked !== this.#asked) return Promise.resolve(false);
+    if (!this.hasDialogTarget) return Promise.resolve(window.confirm(message));
 
     this.#wording = { message, confirm: this.confirmLabelValue, cancel: this.cancelLabelValue };
     this.#applyWording();
@@ -321,9 +321,9 @@ export class ConfirmController extends Controller<HTMLElement> {
    * Applies the open state to the dialog that is now first, when that dialog changed. With a
    * prompt pending, its text is written into that dialog's slots and the modal trap moves onto
    * it, keeping the trap's place among the page's modals and the opener focus returns to; focus
-   * moves inside unless it is already there or a modal opened over this one takes `Tab`. A
-   * pending prompt left with no dialog settles as cancelled, as
-   * {@link ConfirmController.cancel | cancel} would.
+   * moves inside unless it is already there or a modal opened over this one takes `Tab`.
+   * During an absence the stack position, scroll lock and Escape cancellation remain;
+   * the trap has no container for `Tab` or background isolation until a successor arrives.
    */
   #adoptDialog(): void {
     const dialog = this.hasDialogTarget ? this.dialogTarget : null;
@@ -333,12 +333,10 @@ export class ConfirmController extends Controller<HTMLElement> {
       if (dialog) this.#hidden.write(dialog, "");
       return;
     }
-    if (!dialog) {
-      this.#resolve(false);
-      return;
+    if (dialog) {
+      this.#hidden.write(dialog, null);
+      this.#applyWording();
     }
-    this.#hidden.write(dialog, null);
-    this.#applyWording();
     this.#trap.refreshContainer();
   }
 

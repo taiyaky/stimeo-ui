@@ -524,18 +524,18 @@ describe("DialogController", () => {
       expect(document.body.style.overflow).toBe("");
     });
 
-    it("releases the modal side effects when the only dialog leaves while open", async () => {
+    it("keeps the pending modal and scroll lock when the only dialog leaves", async () => {
       trigger().focus();
       controller().open();
       dialog().remove();
       await tick();
 
-      expect(document.body.style.overflow).toBe("");
+      expect(document.body.style.overflow).toBe("hidden");
       expect(background().inert).toBe(false);
-      expect(document.activeElement).toBe(trigger());
+      expect(document.activeElement).toBe(document.body);
     });
 
-    it("closes a dialog that arrives after the only one left", async () => {
+    it("opens a dialog that arrives while the previous open is pending", async () => {
       controller().open();
       const arrival = dialogCopy();
       arrival.hidden = false;
@@ -544,8 +544,8 @@ describe("DialogController", () => {
       root().append(arrival);
       await tick();
 
-      expect(arrival.hidden).toBe(true);
-      expect(document.body.style.overflow).toBe("");
+      expect(arrival.hidden).toBe(false);
+      expect(document.body.style.overflow).toBe("hidden");
     });
 
     it("leaves focus where it is when a dialog arrives behind the current one", async () => {
@@ -619,7 +619,7 @@ describe("DialogController", () => {
       expect(document.body.style.overflow).toBe("hidden");
     });
 
-    it("closes when the only dialog loses its target token", async () => {
+    it("keeps Escape and the scroll lock when the only dialog loses its target token", async () => {
       trigger().focus();
       controller().open();
       const only = dialog();
@@ -627,6 +627,8 @@ describe("DialogController", () => {
       await tick();
 
       expect(only.hidden).toBe(true);
+      expect(document.body.style.overflow).toBe("hidden");
+      typeKey(document, "Escape");
       expect(document.body.style.overflow).toBe("");
       expect(document.activeElement).toBe(trigger());
     });

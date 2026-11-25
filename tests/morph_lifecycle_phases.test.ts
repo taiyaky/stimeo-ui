@@ -394,7 +394,7 @@ describe("morph lifecycle phases", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps a closed drawer's retained panel until a staged replacement takes its place", async () => {
+  it("keeps a drawer closed when a staged replacement takes its place", async () => {
     const { root, instance } = await mount(
       "drawer",
       DrawerController,
@@ -415,8 +415,10 @@ describe("morph lifecycle phases", () => {
     expect(dispatch).not.toHaveBeenCalled();
     previous.remove();
     await vi.advanceTimersByTimeAsync(0);
-    expect(instance.openValue).toBe(true);
-    expect(replacement.hidden).toBe(false);
+    expect(instance.openValue).toBe(false);
+    expect(replacement.dataset.state).toBe("closed");
+    expect(replacement.hidden).toBe(true);
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("does not apply a late panel callback to a disconnected drawer's API move", async () => {

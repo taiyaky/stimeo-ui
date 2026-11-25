@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { announce } from "../utils/announce";
+import { AttributeLease } from "../utils/attribute_lease";
 import { ownerOf } from "../utils/event_owner";
 import { HoverRecheck } from "../utils/hover_recheck";
 import { KeyedTimers } from "../utils/keyed_timers";
@@ -134,6 +135,8 @@ export class FlashController extends Controller<HTMLElement> {
   readonly #fixedDismiss = new KeyedTimers<HTMLElement>();
   /** Applies the cap again once the event that released a hold has run its course. */
   readonly #reapply = new MorphRenderWatcher(() => this.#reapplyCap());
+  readonly #role = new AttributeLease<HTMLElement>("role", this.identifier);
+  readonly #writtenStates = new WeakMap<HTMLElement, "visible" | "leaving">();
   /** Messages the pointer or focus moved into since the cap was last applied again. */
   #spared: HTMLElement[] = [];
   /** The next pointer movement, listened for while a hover hold waits on it. */
@@ -185,7 +188,7 @@ export class FlashController extends Controller<HTMLElement> {
     this.#connected = true;
     const current = this.messageTargets;
     for (const item of this.#arrivals) {
-      if (!current.includes(item)) this.#arrivals.delete(item);
+      if (!current.includes(item)) this.#returnMessage(item);
     }
     this.#discardInherited();
     this.#reapply.observe(this.element);
@@ -280,20 +283,29 @@ export class FlashController extends Controller<HTMLElement> {
    * which is why the element must still be a message to be treated as one: ownership
    * alone reads an in-place attribute rewrite as a move, and a node outside the target
    * set belongs to the consumer, so nothing here may dismiss it. A move may still have
-   * ended a hold, so those are read again.
+   * ended a hold, so those are read again while connected.
    */
   messageTargetDisconnected(message: HTMLElement): void {
-    if (!this.#connected) return;
-    const moved = this.#owns(message) && message.matches(this.#messageSelector);
-    if (moved) {
-      this.#afterMove(message);
+    if (this.#owns(message) && this.messageTargets.includes(message)) {
+      if (this.#connected) this.#afterMove(message);
       return;
     }
-    this.#forget(message);
-    this.#arrivals.delete(message);
+    if (!this.#connected && !message.isConnected) return;
+    this.#returnMessage(message);
+    if (this.#connected) this.#forget(message);
     // Ownership is re-checked at both ends of the leaving transition: dropping the
     // claim here is what the pending finalize reads to leave the node alone.
     this.#leaving.delete(message);
+  }
+
+  /** Returns the role and clears the state marks of a message left on the page. */
+  #returnMessage(message: HTMLElement): void {
+    this.#role.return(message);
+    if (!this.#arrivals.delete(message) || !message.isConnected) return;
+    if (message.getAttribute("data-flash-state") === this.#writtenStates.get(message)) {
+      message.removeAttribute("data-flash-state");
+    }
+    message.removeAttribute(this.#shownAttribute);
   }
 
   /**
@@ -393,9 +405,9 @@ export class FlashController extends Controller<HTMLElement> {
     const assertive = ASSERTIVE_TYPES.has(type);
     // Don't clobber an authored role; otherwise map the flash type to a live role.
     if (!message.hasAttribute("role")) {
-      message.setAttribute("role", assertive ? "alert" : "status");
+      this.#role.write(message, assertive ? "alert" : "status");
     }
-    message.setAttribute("data-flash-state", "visible");
+    this.#writeState(message, "visible");
     message.setAttribute(this.#shownAttribute, "");
     // A message this instance took on before it reconnected was already shown.
     const known = this.#arrivals.has(message);
@@ -487,15 +499,21 @@ export class FlashController extends Controller<HTMLElement> {
     this.#reapply.schedule();
   }
 
+  /** Records which state the stack wrote so a later consumer value can survive departure. */
+  #writeState(message: HTMLElement, state: "visible" | "leaving"): void {
+    this.#writtenStates.set(message, state);
+    message.setAttribute("data-flash-state", state);
+  }
+
   /** Applies the cap again, sparing every message gathered since the last pass. */
   #reapplyCap(): void {
     for (const message of [...this.#order, ...this.#leaving]) {
       if (!this.#owns(message)) continue;
-      message.setAttribute("data-flash-state", this.#leaving.has(message) ? "leaving" : "visible");
+      this.#writeState(message, this.#leaving.has(message) ? "leaving" : "visible");
       message.setAttribute(this.#shownAttribute, "");
       if (!message.hasAttribute("role")) {
         const assertive = ASSERTIVE_TYPES.has(message.getAttribute("data-flash-type") ?? "");
-        message.setAttribute("role", assertive ? "alert" : "status");
+        this.#role.write(message, assertive ? "alert" : "status");
       }
     }
     const spared = this.#spared;
@@ -553,7 +571,7 @@ export class FlashController extends Controller<HTMLElement> {
     this.#forget(message);
     this.#leaving.add(message);
 
-    message.setAttribute("data-flash-state", "leaving");
+    this.#writeState(message, "leaving");
 
     const finalize = (): void => {
       // The claim taken above is the license to remove: a message that lost the target

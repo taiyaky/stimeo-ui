@@ -172,6 +172,41 @@ describe("NestedFormController", () => {
     expect(root().getAttribute("data-nested-count")).toBe("0");
   });
 
+  it.each([
+    ["list", false],
+    ["controller", false],
+    ["list", true],
+    ["controller", true],
+  ] as const)(
+    "keeps a destroyed row hidden when %s leaves (cached: %s)",
+    async (departure, cached) => {
+      const name = "order[items_attributes][0][_destroy]";
+      const persisted = `<fieldset class="row">
+      <input type="hidden" name="${name}" value="0" data-stimeo--nested-form-target="destroyFlag">
+      <button type="button" data-stimeo--nested-form-target="remove">Remove</button>
+    </fieldset>`;
+      await start(`<form>${MARKUP("", persisted)}</form>`);
+      query<HTMLButtonElement>("[data-stimeo--nested-form-target='remove']", list()).click();
+      if (cached) {
+        application = await restoreFromCache(application, (restored) =>
+          restored.register("stimeo--nested-form", NestedFormController),
+        );
+      }
+      const row = query<HTMLElement>(".row", list());
+      const form = query<HTMLFormElement>("form");
+      expect(row.hidden).toBe(true);
+      expect(new FormData(form).get(name)).toBe("1");
+
+      if (departure === "list") list().removeAttribute("data-stimeo--nested-form-target");
+      else root().removeAttribute("data-controller");
+      await tick();
+
+      expect(row.isConnected).toBe(true);
+      expect(row.hidden).toBe(true);
+      expect(new FormData(form).get(name)).toBe("1");
+    },
+  );
+
   // Stimulus reads a target attribute as a space-separated token list, so a
   // declaration carrying more than the bare name still names the target.
   it.each([
@@ -590,7 +625,7 @@ describe("NestedFormController", () => {
     expect(events).toHaveLength(0);
   });
 
-  it("re-clamps and reconciles when min or max change at runtime", async () => {
+  it("refreshes the limit flags and dispatches reconcile when min or max changes at runtime", async () => {
     await start(MARKUP());
     addButton().click();
     addButton().click();

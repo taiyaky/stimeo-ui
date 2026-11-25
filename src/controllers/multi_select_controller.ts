@@ -100,6 +100,12 @@ import { TemplateRow } from "../utils/template_row";
  *   change stay silent.
  * `change` dispatches `{ values: string[], reason: StateReason }`;
  * `reconcile` carries `{ values }`. `filter` dispatches `{ query: string }`.
+ *
+ * When several `tags` containers coexist, only the first row supplies chips and
+ * owns their delegated interaction. Every later row is inert, including an empty
+ * one; focus in a row becoming inert moves to the input first. A row's authored
+ * inert value is returned when it becomes current or leaves the target scope.
+ * Hidden state and ARIA on later rows are left with the page.
  */
 export class MultiSelectController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
@@ -141,6 +147,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
   declare readonly optionTargets: HTMLElement[];
   declare readonly emptyTargets: HTMLElement[];
   declare readonly tagsTarget: HTMLElement;
+  declare readonly tagsTargets: HTMLElement[];
   declare readonly tagTargets: HTMLElement[];
   declare readonly tagTemplateTarget: HTMLTemplateElement;
   declare readonly labelTargets: HTMLElement[];
@@ -165,12 +172,20 @@ export class MultiSelectController extends Controller<HTMLElement> {
   readonly #tabindex = new TabindexLoan("-1", this.identifier);
   /** Last reconciled selection, used to distinguish state changes from derived-DOM repair. */
   #selectionValues: string[] = [];
+  /**
+   * Each last-published chip and its displayed label, replaced at every publication.
+   * A removed value reads that chip's current label while its value still matches,
+   * otherwise the label captured before a morph changed it into another value.
+   */
+  #selectionChips = new Map<string, { readonly chip: HTMLElement; readonly label: string }>();
   /** Whether initial normalization finished, so a fields callback cannot mirror stale state. */
   #connected = false;
   /** Owns `hidden` on the regions declared for the empty-result state. */
   readonly #emptyRegion = new StateRegions({ whenTrue: () => this.emptyTargets }, this.identifier);
-  /** Borrows `hidden` on the list, to give back when an element stops being the list. */
-  readonly #listHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Borrows list and filtered-option visibility until their final target role ends. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Gives selected state back to the author when an option leaves this widget. */
+  readonly #selected = new AttributeLease<HTMLElement>("aria-selected", this.identifier);
   /** Borrows `aria-expanded` on the input, to give back when an element stops being the input. */
   readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
   /** Borrows `aria-activedescendant` on the input, for the same return. */
@@ -200,10 +215,12 @@ export class MultiSelectController extends Controller<HTMLElement> {
     outcome: "changed no selection",
     noun: "chip template",
   });
+  /** Borrows inert while a tags container stands behind the current row. */
+  readonly #rowInert = new AttributeLease<HTMLElement>("inert", this.identifier);
   /** Shared delegated interaction for the replaceable row of removable chips. */
   readonly #chipRow = new ChipRow({
     getDirectionElement: () => this.#chipDirectionElement,
-    getItems: () => this.tagTargets,
+    getItems: () => this.#chips,
     getButton: (tag) =>
       matchingPart<HTMLButtonElement>(tag, `button${this.#rows.selector("remove")}`),
     onRemove: (index) => this.#removeTagAt(index),
@@ -221,15 +238,16 @@ export class MultiSelectController extends Controller<HTMLElement> {
     this.#tab = null;
     this.#tabindex.reclaim(this.element);
     this.#rows.connect();
+    this.#settleTagsRows();
     // A fresh connection has no prior selection to preserve: deterministic DOM
     // order decides which authored selections survive a finite max.
     this.#normalizeSelection([]);
     this.close();
     if (this.hasTagsTarget) {
-      this.#chipRow.connect(this.tagsTarget);
       this.#rebuildTags();
     }
     this.#selectionValues = this.#values;
+    this.#selectionChips = this.#chipsByValue;
     // Seed the hidden fields from any pre-selected options so the form submits
     // the initial selection without an interaction.
     this.#syncFields();
@@ -254,7 +272,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
       if (!chip) return;
       chips.push(chip);
     }
-    for (const tag of this.tagTargets) tag.remove();
+    for (const tag of this.#chips) tag.remove();
     this.tagsTarget.append(...chips);
     this.#chipRow.ensureTabStop();
   }
@@ -277,9 +295,10 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Cleans a removed target and reconciles active state against the surviving DOM. */
   optionTargetDisconnected(option: HTMLElement): void {
-    // `#setActive` can only scan current targets; clean the old node explicitly in
-    // case a Turbo morph reuses it elsewhere.
+    if (this.optionTargets.includes(option)) return;
     option.removeAttribute("data-active");
+    this.#selected.return(option);
+    if (!this.listTargets.includes(option)) this.#hidden.return(option);
     this.#scheduleOptionReconcile();
   }
 
@@ -289,13 +308,15 @@ export class MultiSelectController extends Controller<HTMLElement> {
   }
 
   /** Rebinds delegated chip interaction when Turbo replaces the tags container. */
-  tagsTargetConnected(tags: HTMLElement): void {
-    this.#chipRow.connect(tags);
+  tagsTargetConnected(_tags: HTMLElement): void {
     this.#scheduleOptionReconcile();
   }
 
   /** Releases only the row that actually disconnected, never a newer replacement. */
   tagsTargetDisconnected(tags: HTMLElement): void {
+    if (!this.scope.containsElement(tags) || !this.tagsTargets.includes(tags)) {
+      this.#rowInert.return(tags);
+    }
     this.#chipRow.disconnect(tags);
     this.#scheduleOptionReconcile();
   }
@@ -330,7 +351,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
         this.#adoptPageClose();
         this.#openList = null;
       }
-      this.#listHidden.return(list);
+      if (!this.optionTargets.includes(list)) this.#hidden.return(list);
     }
     if (!this.#connected) return;
     this.#reconcileOpenState();
@@ -372,6 +393,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #reconcileOptions(): void {
+    this.#settleTagsRows();
     const visible = this.#visibleOptions;
     const active = this.#activeOption;
     const next = this.#isClosed ? null : active && !active.hidden ? active : (visible[0] ?? null);
@@ -380,16 +402,18 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
     const previous = this.#selectionValues;
     const previousLabels = new Map(
-      this.tagTargets.map((tag) => [
-        tag.dataset.value ?? "",
-        readLabel(matchingPart(tag, this.#rows.selector("label"))),
+      Array.from(this.#selectionChips, ([value, { chip, label }]) => [
+        value,
+        chip.dataset.value === value
+          ? readLabel(matchingPart(chip, this.#rows.selector("label")))
+          : label,
       ]),
     );
     // Prefer the interaction order represented by live chips. A tags target can
     // be replaced with an empty container, so the last reconciled option set is
     // the fallback that prevents a derived-DOM repair from evicting user choices.
     const priority = [
-      ...new Set([...this.tagTargets.map((tag) => tag.dataset.value ?? ""), ...previous]),
+      ...new Set([...this.#chips.map((tag) => tag.dataset.value ?? ""), ...previous]),
     ];
     this.#normalizeSelection(priority);
     const selected = this.#selectedOptions;
@@ -397,7 +421,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // the options are in DOM order, so an index-wise comparison reports a change
     // for every selection the user made out of DOM order and rebuilds forever.
     const nextValues = selected.map((option) => this.#optionValue(option)).sort();
-    const tagValues = this.tagTargets.map((tag) => tag.dataset.value ?? "").sort();
+    const tagValues = this.#chips.map((tag) => tag.dataset.value ?? "").sort();
     const unchanged =
       nextValues.length === tagValues.length &&
       nextValues.every((value, index) => value === tagValues[index]);
@@ -408,6 +432,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     const values = this.#values;
     const changed = !this.#sameSelection(previous, values);
     this.#selectionValues = values;
+    this.#selectionChips = this.#chipsByValue;
     if (!changed) return;
     const token = this.#moves.record();
 
@@ -461,8 +486,14 @@ export class MultiSelectController extends Controller<HTMLElement> {
     }
 
     for (const option of this.optionTargets) {
-      option.setAttribute("aria-selected", String(kept.has(option)));
+      this.#writeSelected(option, kept.has(option));
     }
+  }
+
+  /** Borrows selection only for a transition; an unchanged authored value stays unclaimed. */
+  #writeSelected(option: HTMLElement, selected: boolean): void {
+    const value = String(selected);
+    if (option.getAttribute("aria-selected") !== value) this.#selected.write(option, value);
   }
 
   /**
@@ -503,17 +534,16 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * Brings the list and the input that are first to one open state. A list that takes
    * over from the one the state was applied to is shown or hidden to match it; the list
    * it was applied to, found hidden while open, was closed by the page. The input's
-   * `aria-expanded` then follows the list. With no list left, nothing is written.
+   * `aria-expanded` describes the logical state even while no list is present.
    */
   #reconcileOpenState(): void {
-    if (!this.hasListTarget) return;
     this.#adoptPageClose();
-    const list = this.listTarget;
+    const list = this.hasListTarget ? this.listTarget : null;
     if (list !== this.#openList) {
-      this.#showList(list, this.#open);
+      if (list) this.#showList(list, this.#open);
       this.#openList = list;
     }
-    if (this.hasInputTarget) this.#expanded.write(this.inputTarget, String(!list.hidden));
+    if (this.hasInputTarget) this.#expanded.write(this.inputTarget, String(!this.#isClosed));
   }
 
   /** Treats the widget as closed when the list the open state was applied to is hidden. */
@@ -529,7 +559,8 @@ export class MultiSelectController extends Controller<HTMLElement> {
     const query = this.inputTarget.value.trim().toLowerCase();
     for (const option of this.optionTargets) {
       const label = (option.textContent ?? "").trim().toLowerCase();
-      option.hidden = query !== "" && !label.includes(query);
+      if (query === "" || label.includes(query)) this.#hidden.return(option);
+      else if (!option.hidden) this.#hidden.write(option, "");
     }
     this.open();
     const visible = this.#visibleOptions;
@@ -551,13 +582,13 @@ export class MultiSelectController extends Controller<HTMLElement> {
       this.#tab = null;
       return;
     }
-    if (!this.hasListTarget || !this.hasInputTarget) {
+    if (!this.hasInputTarget) {
       this.#reflectEmpty();
       return;
     }
-    this.#showList(this.listTarget, true);
     this.#open = true;
-    this.#openList = this.listTarget;
+    this.#openList = this.hasListTarget ? this.listTarget : null;
+    if (this.#openList) this.#showList(this.#openList, true);
     this.#expanded.write(this.inputTarget, "true");
     if (!this.#activeOption) this.#setActive(this.#visibleOptions[0] ?? null);
     this.#reflectEmpty();
@@ -576,10 +607,8 @@ export class MultiSelectController extends Controller<HTMLElement> {
    */
   close(): void {
     this.#open = false;
-    if (this.hasListTarget) {
-      this.#showList(this.listTarget, false);
-      this.#openList = this.listTarget;
-    }
+    this.#openList = this.hasListTarget ? this.listTarget : null;
+    if (this.#openList) this.#showList(this.#openList, false);
     this.#setActive(null);
     if (this.hasInputTarget) this.#expanded.write(this.inputTarget, "false");
     this.#reflectEmpty();
@@ -601,6 +630,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // Target callbacks are MutationObserver-driven. Resolve a replacement now, or
     // clear a removed id now, so a synchronously dispatched key cannot commit a
     // detached node before the callback gets its turn.
+    this.#reconcileOpenState();
     this.#reconcileActiveForInteraction();
     // The tags container defines the same logical boundary as its chip buttons.
     switch (logicalArrowKey(event.key, this.#chipDirectionElement)) {
@@ -713,6 +743,39 @@ export class MultiSelectController extends Controller<HTMLElement> {
       this.#focusInput();
   }
 
+  /** The chips in the first container, or the declared chips while no row exists. */
+  get #chips(): HTMLElement[] {
+    if (!this.hasTagsTarget) return this.tagTargets;
+    const row = this.tagsTarget;
+    const selector = this.#rows.selector("tags");
+    return this.tagTargets.filter((tag) => tag.closest(selector) === row);
+  }
+
+  /** Each current chip paired with its value and displayed label. */
+  get #chipsByValue(): Map<string, { readonly chip: HTMLElement; readonly label: string }> {
+    return new Map(
+      this.#chips.map((tag) => [
+        tag.dataset.value ?? "",
+        { chip: tag, label: readLabel(matchingPart(tag, this.#rows.selector("label"))) },
+      ]),
+    );
+  }
+
+  /** Settles one interactive row, returning its inert before binding chip interaction. */
+  #settleTagsRows(): void {
+    const [current, ...behind] = this.tagsTargets;
+    if (!current) {
+      this.#chipRow.disconnect();
+      return;
+    }
+    this.#rowInert.return(current);
+    this.#chipRow.connect(current);
+    for (const row of behind) {
+      if (row.contains(document.activeElement)) this.#focusInput();
+      this.#rowInert.write(row, "");
+    }
+  }
+
   /** Current tags container, or the root while the target is absent. */
   get #chipDirectionElement(): HTMLElement {
     return this.hasTagsTarget ? this.tagsTarget : this.element;
@@ -777,7 +840,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
       return true;
     }
     if (selected) {
-      option.setAttribute("aria-selected", "false");
+      this.#writeSelected(option, false);
       this.#removeTagFor(option);
     } else {
       // Chips are a display affordance here, not the value model: the selection
@@ -786,7 +849,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
       // be completed is the opposite case — leaving a selection whose chip is
       // missing would be the half-applied state, so that one aborts instead.
       if (this.hasTagTemplateTarget && !this.#appendTag(option)) return true;
-      option.setAttribute("aria-selected", "true");
+      this.#writeSelected(option, true);
     }
     this.#refreshRoving();
     return this.#publishSelection(
@@ -811,7 +874,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // and the options in DOM order, so the two lists hold the same values in
     // different places and an index-wise pairing would relabel the wrong chip.
     const options = new Map(selected.map((option) => [this.#optionValue(option), option]));
-    for (const tag of this.tagTargets) {
+    for (const tag of this.#chips) {
       // The caller established equal selected/tag value sets before refreshing.
       const option = options.get(tag.dataset.value ?? "") as HTMLElement;
       const text = this.#optionLabel(option);
@@ -873,13 +936,13 @@ export class MultiSelectController extends Controller<HTMLElement> {
   /** Removes the chip mirroring `option`, if present. */
   #removeTagFor(option: HTMLElement): void {
     const value = this.#optionValue(option);
-    const tag = this.tagTargets.find((candidate) => candidate.dataset.value === value);
+    const tag = this.#chips.find((candidate) => candidate.dataset.value === value);
     tag?.remove();
   }
 
   /** Removes chip `index` and deselects its option, re-homing focus. */
   #removeTagAt(index: number, focus: "neighbor" | "input" = "neighbor"): void {
-    const tags = this.tagTargets;
+    const tags = this.#chips;
     const tag = tags[index];
     if (!tag) return;
     const afterFocus = focus === "neighbor" && tags.length === 1 && this.hasInputTarget;
@@ -887,7 +950,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // Match by the option's stable value, which falls back to its label when no
     // data-value is present, so a label-keyed chip still finds its option.
     const option = this.optionTargets.find((candidate) => this.#optionValue(candidate) === value);
-    if (option) option.setAttribute("aria-selected", "false");
+    if (option) this.#writeSelected(option, false);
     tag.remove();
     // Prefer the option's display label for the announcement (e.g. "Apple"),
     // which can differ from its data-value (e.g. "apple").
@@ -942,7 +1005,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * the root's state attribute and on the regions declared for that state.
    */
   #reflectEmpty(): void {
-    const empty = !this.#isClosed && this.#visibleOptions.length === 0;
+    const empty = this.hasListTarget && !this.#isClosed && this.#visibleOptions.length === 0;
     this.element.toggleAttribute(`data-${this.identifier}-empty`, empty);
     this.#emptyRegion.reflect(this.element, empty);
   }
@@ -972,6 +1035,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     const changed = !this.#sameSelection(this.#selectionValues, values);
     const fieldChanged = this.#syncFields();
     this.#selectionValues = values;
+    this.#selectionChips = this.#chipsByValue;
     if (!changed) return true;
     const token = this.#moves.record();
     if (fieldChanged) commitField(this.fieldsTarget);
@@ -1028,11 +1092,12 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Options not hidden by the current filter. */
   get #visibleOptions(): HTMLElement[] {
-    return this.optionTargets.filter((option) => !option.hidden);
+    return this.hasListTarget ? this.optionTargets.filter((option) => !option.hidden) : [];
   }
 
   /** Current active target resolved by stable id, never a detached node reference. */
   get #activeOption(): HTMLElement | null {
+    if (!this.hasListTarget) return null;
     return this.optionTargets.find((option) => option.id === this.#activeOptionId) ?? null;
   }
 
@@ -1057,12 +1122,12 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Shows or hides `list` through the lease, so a departed list gets its authored value back. */
   #showList(list: HTMLElement, open: boolean): void {
-    this.#listHidden.write(list, open ? null : "");
+    this.#hidden.write(list, open ? null : "");
   }
 
   /** Whether the list is currently hidden. */
   get #isClosed(): boolean {
-    return !this.hasListTarget || this.listTarget.hidden !== false;
+    return this.#openList ? this.#openList.hidden !== false : !this.#open;
   }
   /** Current `max` declaration resolved against its numeric contract. */
   get #safeMax(): number {

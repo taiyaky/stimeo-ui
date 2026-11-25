@@ -473,16 +473,17 @@ describe("ContextMenuController", () => {
       expect(region().getAttribute("data-state")).toBe("closed");
     });
 
-    it("leaves the Escape stack and reads closed once the only menu leaves", async () => {
+    it("keeps Escape active while the only menu is absent", async () => {
       contextmenu(10, 20);
       menu().remove();
       await tick();
 
-      expect(region().getAttribute("data-state")).toBe("closed");
-      region().focus();
+      expect(region().getAttribute("data-state")).toBe("open");
       const dismissal = keyEvent("Escape", { bubbles: true, cancelable: true });
-      pressKey(region(), dismissal);
-      expect(dismissal.defaultPrevented).toBe(false);
+      pressKey(document.body, dismissal);
+      expect(dismissal.defaultPrevented).toBe(true);
+      expect(region().getAttribute("data-state")).toBe("closed");
+      expect(document.activeElement).toBe(region());
     });
 
     it("brings a region that arrives after the only one left to the open state", async () => {
@@ -497,18 +498,74 @@ describe("ContextMenuController", () => {
       expect(late.getAttribute("data-state")).toBe("open");
     });
 
-    it("closes a menu that arrives after the only one left, even one authored open", async () => {
+    it("opens a replacement at the retained coordinates after the old menu left", async () => {
       contextmenu(10, 20);
-      const late = staleMenu(false);
+      const late = staleMenu(true);
       menu().remove();
       await tick();
 
       root().append(late);
       await tick();
 
-      expect(late.hidden).toBe(true);
-      expect(coordinate(late)).toEqual(["", ""]);
-      expect(region().getAttribute("data-state")).toBe("closed");
+      expect(late.hidden).toBe(false);
+      expect(coordinate(late)).toEqual(["10px", "20px"]);
+      expect(region().getAttribute("data-state")).toBe("open");
+    });
+
+    it.each(["activate", "Escape", "open"] as const)(
+      "handles %s immediately when a new menu takes over",
+      async (action) => {
+        contextmenu(10, 20);
+        const seen = captureStateEvents("stimeo--context-menu", undefined, root());
+        const successor = staleMenu(action === "open");
+        menu().replaceWith(successor);
+        if (action === "Escape") pressKey(document.body, "Escape");
+        else if (action === "activate") controller().activate();
+        else contextmenu(30, 40);
+
+        const remainsOpen = action === "open";
+        expect(successor.hidden).toBe(!remainsOpen);
+        expect(region().getAttribute("data-state")).toBe(remainsOpen ? "open" : "closed");
+        expect(seen.names()).toEqual(remainsOpen ? [] : ["close"]);
+        if (remainsOpen) expect(coordinate(successor)).toEqual(["30px", "40px"]);
+        await tick();
+        expect(successor.hidden).toBe(!remainsOpen);
+        seen.stop();
+      },
+    );
+
+    it("focuses the menu replaced synchronously by an open subscriber", () => {
+      const successor = staleMenu(true);
+      root().addEventListener("stimeo--context-menu:open", () => menu().replaceWith(successor), {
+        once: true,
+      });
+      contextmenu(10, 20);
+
+      expect(successor.hidden).toBe(false);
+      expect(coordinate(successor)).toEqual(["10px", "20px"]);
+      expect(document.activeElement).toBe(successor.querySelector("[role='menuitem']"));
+    });
+
+    it("keeps coordinates written by the page while moving between menus", async () => {
+      contextmenu(10, 20);
+      menu().style.setProperty("--stimeo--context-menu-x", "45px");
+      menu().style.setProperty("--stimeo--context-menu-y", "55px");
+      const successor = staleMenu(true);
+      menu().remove();
+      await tick();
+      root().append(successor);
+      await tick();
+
+      expect(coordinate(successor)).toEqual(["45px", "55px"]);
+    });
+
+    it("does not handle an outside click once the page directly hides the menu", () => {
+      contextmenu(10, 20);
+      menu().setAttribute("hidden", "until-found");
+
+      document.body.click();
+
+      expect(menu().getAttribute("hidden")).toBe("until-found");
     });
 
     it("keeps the menu open when the region and the menu are replaced together", async () => {
@@ -543,6 +600,8 @@ describe("ContextMenuController", () => {
       await tick();
 
       expect(region().getAttribute("data-state")).toBe("closed");
+      const dismissal = pressKey(region(), "Escape");
+      expect(dismissal.defaultPrevented).toBe(false);
     });
 
     it("leaves a hidden value the page wrote on the menu alone when another menu arrives behind it", async () => {

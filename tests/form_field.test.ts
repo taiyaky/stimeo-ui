@@ -1,6 +1,7 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FormFieldController } from "../src/controllers/form_field_controller";
+import { AttributeLease } from "../src/utils/attribute_lease";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
@@ -160,7 +161,7 @@ describe("FormFieldController", () => {
     late.setAttribute("data-stimeo--form-field-target", "error");
     root().append(late);
 
-    controller().errorTargetConnected();
+    controller().errorTargetConnected(late);
     await tick();
 
     expect(control().getAttribute("aria-invalid")).toBe("true");
@@ -199,11 +200,8 @@ describe("FormFieldController", () => {
     }
   });
 
-  it("re-derives the wiring when a shown error's text changes and nothing else does", async () => {
-    // A server-rendered pass writes the message straight into the retained error,
-    // then a later one blanks it while leaving the element visible. Content is the
-    // only mutation either time, so the reconciliation has to notice the write
-    // inside the error target itself.
+  it("clears error wiring when a visible error's text is emptied", async () => {
+    // First reveal an error and establish invalid state, then clear only its text.
     error().textContent = "Server error";
     error().hidden = false;
     await tick();
@@ -446,14 +444,35 @@ describe("FormFieldController dynamic reconciliation", () => {
   it("adopts authored descriptions changed while the same control is detached", async () => {
     const field = root();
     const input = control() as HTMLInputElement;
+    expect(input.getAttribute("aria-describedby")).toBe("external-hint description-a");
     field.remove();
     await tick();
-    expect(input.getAttribute("aria-describedby")).toBe("external-hint external-hint");
+    expect(input.getAttribute("aria-describedby")).toBe("external-hint description-a");
 
     input.setAttribute("aria-describedby", "updated-hint");
+    input.setAttribute("aria-invalid", "grammar");
+    input.setAttribute("aria-errormessage", "updated-error");
     document.body.append(field);
     await tick();
     expect(input.getAttribute("aria-describedby")).toBe("updated-hint description-a");
+
+    field.removeAttribute("data-controller");
+    await tick();
+    expect(input.getAttribute("aria-describedby")).toBe("updated-hint");
+    expect(input.getAttribute("aria-invalid")).toBe("grammar");
+    expect(input.getAttribute("aria-errormessage")).toBe("updated-error");
+  });
+
+  it("reads the same control's authored description when the field is re-enabled in place", () => {
+    const field = controller();
+    const input = control();
+    if (!input) throw new Error("Expected a control target");
+    field.context.disconnect();
+    input.setAttribute("aria-describedby", "changed-hint");
+
+    field.context.connect();
+
+    expect(input.getAttribute("aria-describedby")).toBe("changed-hint description-a");
   });
 
   it("keeps the invalid request but not the message when the error target is exchanged", async () => {
@@ -493,6 +512,112 @@ describe("FormFieldController dynamic reconciliation", () => {
     expect(input.getAttribute("aria-describedby")).toBe("external-hint external-hint");
     expect(input.getAttribute("aria-invalid")).toBe("spelling");
     expect(input.getAttribute("aria-errormessage")).toBe("legacy-error");
+  });
+
+  it.each([
+    ["target", false],
+    ["identifier", false],
+    ["target", true],
+    ["identifier", true],
+  ] as const)(
+    "returns the error visibility on %s departure after cache=%s",
+    async (kind, cache) => {
+      error().setAttribute("hidden", "until-found");
+      controller().setError("Required.");
+      if (cache) {
+        application = await restoreFromCache(application, (restored) =>
+          restored.register("stimeo--form-field", FormFieldController),
+        );
+      }
+      const field = root();
+      const shown = error();
+      expect(shown.hasAttribute("hidden")).toBe(false);
+      if (kind === "target") shown.removeAttribute("data-stimeo--form-field-target");
+      else field.removeAttribute("data-controller");
+      await tick();
+
+      expect(shown.getAttribute("hidden")).toBe("until-found");
+      expect(shown.textContent).toBe("Required.");
+      expect(field.hasAttribute("data-stimeo--form-field-invalid")).toBe(
+        kind === "target" && !cache,
+      );
+    },
+  );
+
+  it("keeps the latest page visibility and returns a newly written hidden attribute", async () => {
+    const shown = error();
+    shown.removeAttribute("hidden");
+    controller().clearError();
+    expect(shown.hasAttribute("hidden")).toBe(true);
+    shown.setAttribute("hidden", "until-found");
+    controller().setError("Required.");
+    expect(shown.hasAttribute("hidden")).toBe(false);
+    shown.removeAttribute("data-stimeo--form-field-target");
+    await tick();
+    expect(shown.getAttribute("hidden")).toBe("until-found");
+  });
+
+  it.each([false, true])("returns an error unmarked while detached, cached=%s", async (cached) => {
+    controller().setError("Required.");
+    if (cached) {
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--form-field", FormFieldController),
+      );
+    }
+    const field = root();
+    const input = control();
+    if (!input) throw new Error("Missing control");
+    const shown = error();
+    const associated = input.getAttribute("aria-describedby");
+    field.append(shown);
+    await tick();
+    expect(shown.hasAttribute("hidden")).toBe(false);
+    expect(input.getAttribute("aria-errormessage")).toBe(shown.id);
+
+    field.remove();
+    await tick();
+    expect(shown.hasAttribute("hidden")).toBe(false);
+    expect(input.getAttribute("aria-describedby")).toBe(associated);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-errormessage")).toBe(shown.id);
+    shown.removeAttribute("data-stimeo--form-field-target");
+    document.body.append(field);
+    await tick();
+
+    expect(shown.hasAttribute("hidden")).toBe(true);
+    expect(input.getAttribute("aria-errormessage")).toBeNull();
+    expect(input.getAttribute("aria-invalid")).toBe(String(!cached));
+  });
+
+  it("returns the visibility of an error acquired and unmarked before target callbacks", async () => {
+    const shown = document.createElement("p");
+    shown.hidden = true;
+    shown.textContent = "Temporary error.";
+    shown.setAttribute("data-stimeo--form-field-target", "error");
+    root().append(shown);
+    controller().setError();
+    expect(shown.hidden).toBe(false);
+
+    shown.removeAttribute("data-stimeo--form-field-target");
+    await tick();
+    expect(shown.hidden).toBe(true);
+    expect(shown.textContent).toBe("Temporary error.");
+  });
+
+  it("forgets an error once its attributes have been returned", async () => {
+    const shown = error();
+    controller().setError("Required.");
+    shown.removeAttribute("data-stimeo--form-field-target");
+    await tick();
+
+    const returnAttribute = vi.spyOn(AttributeLease.prototype, "return");
+    try {
+      description().id = "renamed-description";
+      await tick();
+      expect(returnAttribute).not.toHaveBeenCalledWith(shown);
+    } finally {
+      returnAttribute.mockRestore();
+    }
   });
 
   it("keeps the control's error ARIA through turbo:before-cache, which also fires on a page that stays", () => {
@@ -548,7 +673,7 @@ describe("FormFieldController dynamic reconciliation", () => {
   it("drops a queued reconciliation when it disconnects", async () => {
     const input = control() as HTMLInputElement;
 
-    controller().errorTargetConnected();
+    controller().errorTargetConnected(error());
     controller().disconnect();
     await tick();
 
@@ -623,8 +748,9 @@ describe("FormFieldController with a server-rendered error", () => {
       "stimeo--form-field",
     ) as FormFieldController;
 
-    error().remove();
-    controller.errorTargetDisconnected();
+    const previous = error();
+    previous.remove();
+    controller.errorTargetDisconnected(previous);
     await tick();
 
     expect(control().getAttribute("aria-invalid")).toBe("false");

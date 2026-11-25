@@ -8,14 +8,6 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link CarouselController}: the APG Carousel — slide
- * navigation with `data-state`/`hidden`/`inert` sync, picker `aria-selected` +
- * roving tabindex, autoplay whose intent lives in the `autoplay` Value and whose
- * suspensions (hover, focus, hidden tab) each lift on their own, the leased ARIA
- * on the step controls and the slide container, and timer teardown on disconnect.
- */
-
 const markup = (attrs = "") => `
   <section data-controller="stimeo--carousel" aria-roledescription="carousel"
            aria-label="Featured" ${attrs}
@@ -100,6 +92,13 @@ const preferReducedMotion = () =>
       }) as MediaQueryList,
   );
 
+/**
+ * Behavioral tests for {@link CarouselController}: the APG Carousel — slide
+ * navigation with `data-state`/`hidden`/`inert` sync, picker `aria-selected` +
+ * roving tabindex, autoplay whose intent lives in the `autoplay` Value and whose
+ * suspensions (hover, focus, hidden tab) each lift on their own, the leased ARIA
+ * on the step controls and the slide container, and timer teardown on disconnect.
+ */
 describe("CarouselController", () => {
   let application: Application;
 
@@ -1404,7 +1403,9 @@ describe("CarouselController", () => {
       expect(edges).toEqual(["pause"]);
       expect(host.dataset.state).toBe("paused");
       vi.advanceTimersByTime(2000);
-      expect(states()).toEqual(["active", "inactive", "inactive"]);
+      expect(states()).toEqual([null, null, null]);
+      expect(slides().map((slide) => slide.hidden)).toEqual([false, true, true]);
+      expect(slides().map((slide) => slide.hasAttribute("inert"))).toEqual([false, false, false]);
     });
 
     it("keeps the rotation and its phase across an in-page move, reporting nothing", async () => {
@@ -1598,9 +1599,9 @@ describe("CarouselController", () => {
       expect(states()).toEqual(["inactive", "active", "inactive"]);
     });
 
-    it("carries no pointer suspension into a connect that follows a real detach", async () => {
-      // Only a reconnect in the same batch is a move; after the run has ended, a later
-      // connect reads the pointer afresh like any first one.
+    it("carries no pointer suspension into a connect that follows a disconnect without an immediate reconnect", async () => {
+      // Let the disconnect's microtask finish before reconnecting the same controller.
+      // The later connect reads the pointer state afresh.
       await startMovable(
         'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
       );
@@ -1968,12 +1969,20 @@ describe("CarouselController", () => {
 
     it("keeps every leased attribute through turbo:before-cache, which also fires on a page that stays", async () => {
       await start('data-stimeo--carousel-loop-value="false"');
+      expect(playToggle().getAttribute("aria-pressed")).toBe("false");
 
       document.dispatchEvent(new Event("turbo:before-cache"));
 
       expect(stepControl("prev").getAttribute("aria-disabled")).toBe("true");
       expect(viewport().getAttribute("aria-live")).toBe("polite");
       expect(viewport().getAttribute("aria-atomic")).toBe("false");
+      expect(playToggle().getAttribute("aria-pressed")).toBe("false");
+      const snapshot = root().cloneNode(true) as HTMLElement;
+      expect(
+        snapshot
+          .querySelector("[data-stimeo--carousel-target='playToggle']")
+          ?.getAttribute("aria-pressed"),
+      ).toBe("false");
     });
 
     it("gives the author's attributes back on a page restored from the cache", async () => {

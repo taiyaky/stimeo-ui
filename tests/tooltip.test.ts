@@ -407,7 +407,7 @@ describe("TooltipController", () => {
     expect(press.defaultPrevented).toBe(true);
   });
 
-  it("cleans up listeners when the content target is removed", async () => {
+  it("drops scroll resources while absent and closes the retained state with Escape", async () => {
     disconnectAndStopApplication(application);
     await start('data-stimeo--tooltip-close-on-scroll-value="true"');
     fire(trigger(), "mouseenter");
@@ -415,9 +415,9 @@ describe("TooltipController", () => {
     detachedContent.remove();
     await vi.advanceTimersByTimeAsync(0);
 
-    // The removal itself released the layer, so the press reaches whatever is below.
+    // The logical shown state retains one Escape press while its content is absent.
     const firstEscape = typeKey(document, "Escape");
-    expect(firstEscape.defaultPrevented).toBe(false);
+    expect(firstEscape.defaultPrevented).toBe(true);
 
     root().append(detachedContent);
     detachedContent.hidden = false;
@@ -427,17 +427,15 @@ describe("TooltipController", () => {
     expect(secondEscape.defaultPrevented).toBe(false);
   });
 
-  it("ignores a show request while the content target is absent", () => {
+  it("retains a show request while the content target is absent", () => {
     const capture = captureStateEvents("stimeo--tooltip");
     try {
       const detachedContent = content();
       detachedContent.remove();
       expect(() => controller().show()).not.toThrow();
-      expect(capture.seen).toEqual([]);
-      const press = typeKey(document, "Escape");
-      expect(press.defaultPrevented).toBe(false);
+      expect(capture.names()).toEqual(["open"]);
 
-      // The same request shows the tooltip once the target is back.
+      // Restoring the surface reflects the request without another state move.
       root().append(detachedContent);
       controller().show();
       expect(detachedContent.hidden).toBe(false);
@@ -620,7 +618,7 @@ describe("TooltipController", () => {
       expect(content().hidden).toBe(true);
     });
 
-    it("releases the layer, the scroll dismissal and the pending hide when the shown content leaves", async () => {
+    it("drops scroll resources while a pending hide and Escape survive the absent content", async () => {
       disconnectAndStopApplication(application);
       await start(
         'data-stimeo--tooltip-close-on-scroll-value="true" data-stimeo--tooltip-hide-delay-value="200"',
@@ -637,20 +635,24 @@ describe("TooltipController", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(departed.hidden).toBe(true);
-      expect(departed.getAttribute("data-state")).toBe("closed");
+      expect(departed.getAttribute("data-state")).toBeNull();
+      expect(vi.getTimerCount()).toBe(1);
+      window.dispatchEvent(new Event("scroll"));
+      expect(capture.seen).toEqual([]);
+      vi.advanceTimersByTime(200);
       expect(vi.getTimerCount()).toBe(0);
       expect(pressEscape()).toBe(false);
-      // No scroll listener is left: content put back and shown by hand stays shown.
+      // No scroll listener is left after the pending hide settles without content.
       root().append(departed);
       departed.hidden = false;
       window.dispatchEvent(new Event("scroll"));
       expect(departed.hidden).toBe(false);
-      // Target churn is not a state move anyone made, so it reports nothing.
-      expect(capture.seen).toEqual([]);
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["pointer"]);
     });
 
     for (const order of ["removed first", "added first"] as const) {
-      it(`hands the next show to content a morph swapped in (${order})`, async () => {
+      it(`carries the shown state to content a morph swapped in (${order})`, async () => {
         disconnectAndStopApplication(application);
         await start('data-stimeo--tooltip-close-on-scroll-value="true"');
         capture.clear();
@@ -668,8 +670,7 @@ describe("TooltipController", () => {
         }
         await vi.advanceTimersByTimeAsync(0);
 
-        expect(arrived.hidden).toBe(true);
-        expect(pressEscape()).toBe(false);
+        expect(arrived.hidden).toBe(false);
         expect(capture.seen).toEqual([]);
 
         fire(trigger(), "mouseenter");
@@ -678,20 +679,20 @@ describe("TooltipController", () => {
         expect(arrived.hidden).toBe(true);
         // The scroll close released the one layer this show took.
         expect(pressEscape()).toBe(false);
-        expect(capture.names()).toEqual(["open", "close"]);
-        expect(capture.reasons()).toEqual(["pointer", "scroll"]);
+        expect(capture.names()).toEqual(["close"]);
+        expect(capture.reasons()).toEqual(["scroll"]);
       });
     }
 
-    it("writes the hidden state onto replacement content that arrives shown", async () => {
+    it("keeps replacement content shown without another state report", async () => {
       fire(trigger(), "mouseenter");
       const departed = content();
       const arrived = freshContent();
       arrived.hidden = false;
       departed.replaceWith(arrived);
       await vi.advanceTimersByTimeAsync(0);
-      expect(arrived.hidden).toBe(true);
-      expect(arrived.getAttribute("data-state")).toBe("closed");
+      expect(arrived.hidden).toBe(false);
+      expect(arrived.getAttribute("data-state")).toBe("open");
       expect(capture.names()).toEqual(["open"]);
     });
 

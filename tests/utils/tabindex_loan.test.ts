@@ -26,7 +26,7 @@ describe("TabindexLoan", () => {
   });
 
   describe("lending", () => {
-    it("adds tabindex=-1 by default", () => {
+    it("lends tabindex=-1 when configured for programmatic focus", () => {
       loan.lend(element);
       expect(element.getAttribute("tabindex")).toBe("-1");
     });

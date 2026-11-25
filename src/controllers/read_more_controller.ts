@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { BlurDeferral } from "../utils/blur_deferral";
 import { LayoutObserver } from "../utils/layout_observer";
 import { stateReasonFor } from "../utils/state_reason";
@@ -54,6 +55,7 @@ export class ReadMoreController extends Controller<HTMLElement> {
   static events = ["close", "open"] as const;
 
   declare readonly contentTarget: HTMLElement;
+  declare readonly contentTargets: HTMLElement[];
   declare readonly triggerTarget: HTMLElement;
   declare readonly triggerTargets: HTMLElement[];
   declare readonly expandedLabelTargets: HTMLElement[];
@@ -72,6 +74,9 @@ export class ReadMoreController extends Controller<HTMLElement> {
     if (this.#connected) this.#evaluateOverflow();
   };
   readonly #layout = new LayoutObserver(this.#update);
+  readonly #contentState = new AttributeLease<HTMLElement>("data-state", this.identifier);
+  readonly #triggerState = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  readonly #triggerVisibility = new AttributeLease<HTMLElement>("hidden", this.identifier);
 
   /** Owns `hidden` on the trigger's two labels. */
   readonly #labels = new StateRegions(
@@ -109,7 +114,9 @@ export class ReadMoreController extends Controller<HTMLElement> {
     this.#syncTargets();
   }
 
-  contentTargetDisconnected(): void {
+  contentTargetDisconnected(content: HTMLElement): void {
+    if (!this.scope.containsElement(content) || !this.contentTargets.includes(content))
+      this.#contentState.return(content);
     this.#syncTargets();
   }
 
@@ -117,10 +124,14 @@ export class ReadMoreController extends Controller<HTMLElement> {
     this.#syncTargets();
   }
 
-  /** Gives a button that no longer resolves as the trigger the label pair its author wrote. */
+  /** Restores disclosure and label attributes when a button leaves the trigger scope. */
   triggerTargetDisconnected(trigger: HTMLElement): void {
-    this.#deferredHide.release(trigger);
-    if (!this.triggerTargets.includes(trigger)) this.#labels.release(trigger);
+    if (!this.scope.containsElement(trigger) || !this.triggerTargets.includes(trigger)) {
+      this.#deferredHide.release(trigger);
+      this.#labels.release(trigger);
+      this.#triggerState.return(trigger);
+      this.#triggerVisibility.return(trigger);
+    }
     this.#syncTargets();
   }
 
@@ -154,10 +165,10 @@ export class ReadMoreController extends Controller<HTMLElement> {
 
   #reflect(): void {
     if (this.hasContentTarget) {
-      this.contentTarget.setAttribute("data-state", this.#collapsed ? "collapsed" : "expanded");
+      this.#contentState.write(this.contentTarget, this.#collapsed ? "collapsed" : "expanded");
     }
     if (this.hasTriggerTarget) {
-      this.triggerTarget.setAttribute("aria-expanded", this.#collapsed ? "false" : "true");
+      this.#triggerState.write(this.triggerTarget, this.#collapsed ? "false" : "true");
       this.#labels.reflect(this.triggerTarget, !this.#collapsed);
     }
   }
@@ -211,17 +222,17 @@ export class ReadMoreController extends Controller<HTMLElement> {
     const useful = !this.#collapsed || content.scrollHeight > content.clientHeight;
     if (useful) {
       this.#deferredHide.releaseAll();
-      trigger.hidden = false;
+      this.#triggerVisibility.write(trigger, null);
       return;
     }
 
     if (document.activeElement === trigger) {
-      trigger.hidden = false;
+      this.#triggerVisibility.write(trigger, null);
       this.#deferredHide.deferOnly(trigger);
       return;
     }
 
     this.#deferredHide.releaseAll();
-    trigger.hidden = true;
+    this.#triggerVisibility.write(trigger, "");
   }
 }

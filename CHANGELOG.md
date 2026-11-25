@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.19.0] - 2026-11-25
+
+Minor release focused on keyboard focus, IME editing, and replacing component
+markup during page updates.
+
+### Changed
+
+- **Breaking** tree-view: add a `group` target to each child group the controller
+  should show or hide. `role="group"` still defines the hierarchy. Groups without
+  the target keep the page's `hidden` state.
+- **Breaking** focus traps now follow the browser's Tab starting position after
+  a click on non-focusable content or when the focused element is removed or
+  hidden. This affects dialog, alert-dialog, confirm, drawer, sidebar in overlay
+  mode, command-palette, and focus.
+
+### Fixed
+
+- Tab and Shift+Tab enter an unchecked radio group at its first and last
+  reachable options, respectively. Focus handoffs use the checked option when
+  one exists.
+- editable: Cancel discards the edit when pressing it blurs the input before the
+  click. hover-card stays open while the pointer remains inside after focus moves.
+- character-counter, currency-input, multi-select, and otp accept values written
+  by the page after IME confirmation, including after focus leaves the field.
+- Components restore authored attributes when targets leave their scope and
+  preserve state when targets move within it.
+- Menus, popups, and dialogs preserve their open state, pending actions, and
+  Escape dismissal while their targets are replaced.
+- tags-input, multi-select, file-dropzone, and toast keep later lists inactive
+  until the first list leaves. multi-select announces removed chips by their
+  former labels.
+
 ## [0.18.2] - 2026-11-21
 
 Patch release focused on numeric stepping, focus, and text editing.
@@ -1460,6 +1492,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.19.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.19.0
 [0.18.2]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.18.2
 [0.18.1]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.18.1
 [0.18.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.18.0

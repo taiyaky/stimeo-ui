@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { syncActiveOption } from "../../src/utils/active_option";
+import { AttributeLease } from "../../src/utils/attribute_lease";
 
 /**
  * Tests for {@link syncActiveOption}.
@@ -74,6 +75,28 @@ describe("syncActiveOption", () => {
   });
 
   describe("the write count", () => {
+    it("counts only actual selection writes while leasing author attributes", async () => {
+      options = build(200);
+      const first = options[0] as HTMLElement;
+      const last = options[199] as HTMLElement;
+      first.removeAttribute("aria-selected");
+      const lease = new AttributeLease<HTMLElement>("aria-selected", "example");
+      expect(syncActiveOption(options, first, lease)).toBe(1);
+      const write = vi.spyOn(lease, "write");
+
+      expect(
+        await countMutations(() => {
+          expect(syncActiveOption(options, last, lease)).toBe(2);
+          expect(syncActiveOption(options, last, lease)).toBe(0);
+        }),
+      ).toBe(2);
+      expect(write).toHaveBeenCalledTimes(2);
+
+      lease.returnAll();
+      expect(first.hasAttribute("aria-selected")).toBe(false);
+      expect(last.getAttribute("aria-selected")).toBe("false");
+    });
+
     it("writes only the two options that changed on a move", async () => {
       syncActiveOption(options, options[1] as HTMLElement);
 

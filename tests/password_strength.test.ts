@@ -6,16 +6,7 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
-
-/**
- * Behavioral tests for {@link PasswordStrengthController}: the strength heuristic
- * and its level buckets, the immediate meter ARIA / `data-strength` / custom
- * property / visible label / `change` updates, the debounced opt-in announcement
- * handed to the shared announcer (driven by a mocked clock), custom and degenerate
- * level scales, the `minScore` gate, external scores, runtime reconciliation, the
- * reading kept through turbo:before-cache, and teardown.
- */
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /** Must match the controller's private announce debounce. */
 const ANNOUNCE_MS = 200;
@@ -27,6 +18,14 @@ interface StrengthDetail {
   readonly meetsMin: boolean;
 }
 
+/**
+ * Behavioral tests for {@link PasswordStrengthController}: the strength heuristic
+ * and its level buckets, the immediate meter ARIA / `data-strength` / custom
+ * property / visible label / `change` updates, the debounced opt-in announcement
+ * handed to the shared announcer (driven by a mocked clock), custom and degenerate
+ * level scales, the `minScore` gate, external scores, runtime reconciliation, the
+ * reading kept through turbo:before-cache, and teardown.
+ */
 describe("PasswordStrengthController", () => {
   let application: Application | null = null;
   let announcementMessages: string[] = [];
@@ -201,10 +200,30 @@ describe("PasswordStrengthController", () => {
   });
 
   it("reflects a server-rendered field value synchronously on connect", async () => {
-    await start("", 'value="Password1!"');
-    expect(meter().getAttribute("aria-valuenow")).toBe("3");
-    expect(root().getAttribute("data-strength")).toBe("good");
-    expect(label().textContent).toBe("good");
+    const reading = () => ({
+      score: meter().getAttribute("aria-valuenow"),
+      band: root().getAttribute("data-strength"),
+      label: label().textContent,
+    });
+    const readings: ReturnType<typeof reading>[] = [];
+    const connect = PasswordStrengthController.prototype.connect;
+    const connecting = vi
+      .spyOn(PasswordStrengthController.prototype, "connect")
+      .mockImplementation(function (this: PasswordStrengthController) {
+        readings.push(reading());
+        connect.call(this);
+        readings.push(reading());
+      });
+    try {
+      await start("", 'value="Password1!"');
+      expect(connecting).toHaveBeenCalledTimes(1);
+      expect(readings).toEqual([
+        { score: null, band: null, label: "" },
+        { score: "3", band: "good", label: "good" },
+      ]);
+    } finally {
+      connecting.mockRestore();
+    }
   });
 
   it("neither dispatches nor announces on the initial reflection", async () => {
@@ -558,7 +577,7 @@ describe("PasswordStrengthController", () => {
     type("Password1"); // fair
     type("Password1!"); // good, inside the debounce window
     await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
-    // Only the level the typing settled on is spoken.
+    // Only the settled level is sent to the announcer.
     expect(announcementMessages).toEqual(["Strength: good"]);
   });
 
@@ -577,7 +596,7 @@ describe("PasswordStrengthController", () => {
     expect(announcementMessages).toEqual(["Strength: good", "Strength: good"]);
   });
 
-  it("does not re-announce a level the reader already heard", async () => {
+  it("does not send another announcement request for the same level", async () => {
     await start('data-stimeo--password-strength-announce-text-value="{level}"');
     type("Password1!");
     await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
@@ -587,7 +606,7 @@ describe("PasswordStrengthController", () => {
     await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
     expect(announcementMessages).toEqual(["good"]);
 
-    type("Password1!longer"); // a real transition is spoken
+    type("Password1!longer"); // a level transition sends another request
     await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
     expect(announcementMessages).toEqual(["good", "strong"]);
   });
@@ -605,8 +624,7 @@ describe("PasswordStrengthController", () => {
     await start();
     type("Password1!");
     await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
-    // Declaring a template after the window closed announces nothing by itself:
-    // reconciliation repaints, it does not speak.
+    // Declaring a template after the window closed sends no announcement request by itself.
     root().setAttribute("data-stimeo--password-strength-announce-text-value", "{level}");
     await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
     expect(announcementMessages).toEqual([]);
@@ -625,9 +643,8 @@ describe("PasswordStrengthController", () => {
   it("retargets a pending announcement onto a scale swapped under it", async () => {
     await start('data-stimeo--password-strength-announce-text-value="{level}"');
     type("Password1!");
-    // A locale swap can replace the labels mid-window. The reader hears the label
-    // that ends up shown -- never one the current scale does not carry -- and it
-    // counts as the level already heard, so the same score stays quiet after.
+    // A locale swap can replace the labels mid-window. The request uses the label
+    // on the current scale, and repeating that score sends no duplicate request.
     root().setAttribute(
       "data-stimeo--password-strength-levels-value",
       '["low","mid","high","top"]',
@@ -709,7 +726,8 @@ describe("PasswordStrengthController", () => {
     controller.connect();
     expect(label().textContent).toBe("good");
     input().value = "";
-    await vi.advanceTimersByTimeAsync(0);
+    expect(label().textContent).toBe("good");
+    await flushMicrotasks();
 
     expect(label().textContent).toBe("");
     expect(meter().getAttribute("aria-valuenow")).toBe("0");

@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
+import { AttributeLease } from "../utils/attribute_lease";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
@@ -118,6 +119,7 @@ export class PaginationController extends Controller<HTMLElement> {
 
   /** The `tabindex` this instance lends the root for the focus fallback. */
   readonly #tabindex = new TabindexLoan("-1", this.identifier);
+  readonly #current = new AttributeLease<HTMLElement>("aria-current", this.identifier);
 
   /**
    * Collapses the Value and target callbacks of one mutation into one pass, and
@@ -155,6 +157,11 @@ export class PaginationController extends Controller<HTMLElement> {
   /** Syncs a page button appended/replaced at runtime (the consumer owns the list). */
   pageTargetConnected(): void {
     this.#repaint.schedule();
+  }
+
+  /** Returns the current-page attribute when a button leaves the target set. */
+  pageTargetDisconnected(button: HTMLElement): void {
+    if (!this.pageTargets.includes(button)) this.#current.return(button);
   }
 
   /** Syncs a `prev` button appended/replaced at runtime. */
@@ -257,11 +264,7 @@ export class PaginationController extends Controller<HTMLElement> {
     const token = this.#moveToken;
     const page = this.#page;
     for (const button of this.pageTargets) {
-      if (Number(button.dataset.page) === page) {
-        button.setAttribute("aria-current", "page");
-      } else {
-        button.removeAttribute("aria-current");
-      }
+      this.#current.write(button, Number(button.dataset.page) === page ? "page" : null);
     }
 
     const prev = this.hasPrevTarget ? this.prevTarget : null;
@@ -336,9 +339,7 @@ export class PaginationController extends Controller<HTMLElement> {
     // elements swallow `focus()` silently, so an unchecked destination leaves the
     // caret in the subtree that is about to disable and drops it to <body> a frame
     // later — the outcome this rescue exists to prevent.
-    // Narrowed to `HTMLElement`, not `HTMLButtonElement`: `pageTargets` is typed
-    // `HTMLElement[]`, so a page control can legitimately be an `<a>`. The
-    // destination is only ever focused, so the wider type is the honest one.
+    // Page controls may be links. The destination only needs to support `focus()`.
     const destination = [opposite, currentPage].find(
       (candidate): candidate is HTMLElement => candidate != null && canTakeFocus(candidate),
     );

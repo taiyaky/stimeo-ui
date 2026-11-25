@@ -190,6 +190,77 @@ describe("MultiSelectController", () => {
     return records;
   };
 
+  it("keeps an authored hidden value through matching, nonmatching and cleared queries", async () => {
+    document.body.innerHTML = markup().replace(
+      'id="ms-apple"',
+      'id="ms-apple" hidden="until-found"',
+    );
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+    const apple = document.getElementById("ms-apple") as HTMLElement;
+
+    for (const query of ["ap", "ban", ""]) {
+      filterTo(query);
+      expect(apple.getAttribute("hidden")).toBe("until-found");
+    }
+    expect(
+      options()
+        .slice(1)
+        .every((option) => !option.hidden),
+    ).toBe(true);
+    expect(active()).toBe("ms-banana");
+  });
+
+  it("leaves page edits to a selected and filtered option when its target role ends", async () => {
+    await mount();
+    const apple = options()[0] as HTMLElement;
+    apple.click();
+    filterTo("ban");
+    apple.setAttribute("aria-selected", "mixed");
+    apple.setAttribute("hidden", "until-found");
+
+    apple.removeAttribute("data-stimeo--multi-select-target");
+    await tick();
+
+    expect(apple.getAttribute("aria-selected")).toBe("mixed");
+    expect(apple.getAttribute("hidden")).toBe("until-found");
+    expect(apple.hasAttribute("data-stimeo--multi-select-aria-selected-lease")).toBe(false);
+    expect(apple.hasAttribute("data-stimeo--multi-select-hidden-lease")).toBe(false);
+  });
+
+  it("writes selected state only when the value changes", async () => {
+    await mount();
+    const apple = options()[0] as HTMLElement;
+    const unchanged = await attributeWrites(apple, ["aria-selected"], () =>
+      root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true })),
+    );
+    expect(unchanged).toHaveLength(0);
+    expect(apple.hasAttribute("data-stimeo--multi-select-aria-selected-lease")).toBe(false);
+
+    const changed = await attributeWrites(apple, ["aria-selected"], () => apple.click());
+    expect(changed).toHaveLength(1);
+    expect(apple.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("keeps selected state and virtual focus when the same option moves inside the list", async () => {
+    await mount();
+    const apple = options()[0] as HTMLElement;
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown");
+    apple.click();
+
+    const writes = await attributeWrites(apple, ["aria-selected", "hidden"], () =>
+      list().append(apple),
+    );
+
+    expect(writes).toHaveLength(0);
+    expect(apple.getAttribute("aria-selected")).toBe("true");
+    expect(apple.hasAttribute("data-active")).toBe(true);
+    expect(active()).toBe(apple.id);
+  });
+
   it("rejects nested-origin action events while accepting owned descendants", async () => {
     await mount();
     const element = document.querySelector<HTMLElement>("[data-controller='stimeo--multi-select']");
@@ -224,7 +295,7 @@ describe("MultiSelectController", () => {
     expect(reports[0]?.detail.reason).toBe("user");
   });
 
-  it("preserves input focus after a blocked event activation", async () => {
+  it("returns focus to the input after an option activation blocked by the selection cap", async () => {
     await mount('data-stimeo--multi-select-max-value="1"');
     options()[0]?.click();
     const inside = document.createElement("button");
@@ -628,7 +699,7 @@ describe("MultiSelectController", () => {
     expect(document.activeElement).toBe(row.querySelectorAll("button")[1]);
   });
 
-  it("follows the active option by scrolling the LIST only", async () => {
+  it("scrolls the list to bring the active option into view", async () => {
     await mount();
     // Focusing opens the list; close it so the key reaches the closed-state handler.
     input().focus();
@@ -874,8 +945,10 @@ describe("MultiSelectController", () => {
     expect(options().map((option) => option.hidden)).toEqual([false, false, true]);
 
     input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
-    // The usual post-composition input must not duplicate the confirmed query event.
-    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
+    // A composition input echoing the confirmation leaves the query event count unchanged.
+    input().dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType: "insertFromComposition" }),
+    );
     expect(options().map((option) => option.hidden)).toEqual([true, true, false]);
     expect(active()).toBe("ms-cherry");
     expect(queries).toEqual(["ch"]);
@@ -951,10 +1024,11 @@ describe("MultiSelectController", () => {
     expect(tags().map((t) => t.dataset.value)).toEqual(["banana", "cherry"]);
   });
 
-  it("re-homes focus to the input after selecting an option by click", async () => {
+  it("keeps focus on the input after an option click", async () => {
     await mount();
     input().focus();
-    options()[0]?.click(); // the non-focusable option blurs the input to body
+    // Click the option and verify that keyboard focus is on the input afterward.
+    options()[0]?.click();
     expect(list().hidden).toBe(false); // the list deliberately stays open…
     expect(document.activeElement).toBe(input()); // …so the keyboard must stay live
   });
@@ -1411,6 +1485,8 @@ describe("MultiSelectController", () => {
     const remove = row.querySelector<HTMLButtonElement>("button") as HTMLButtonElement;
 
     row.removeAttribute("data-stimeo--multi-select-target");
+    controller().tagsTargetDisconnected(row);
+    expect(() => remove.click()).not.toThrow();
     await tick();
 
     expect(() => remove.click()).not.toThrow();
@@ -1961,7 +2037,7 @@ describe("MultiSelectController", () => {
     expect(list().hidden).toBe(false); // a surviving listener would have closed it
   });
 
-  it("has no machine-detectable a11y violations (closed, open, selected)", async () => {
+  it("has no machine-detectable a11y violations while closed and while open with a selection", async () => {
     await mount();
     // Focusing opens the list; close it so the key reaches the closed-state handler.
     input().focus();
@@ -2873,6 +2949,57 @@ describe("MultiSelectController", () => {
   });
 
   describe("a list target that is replaced or stays after an earlier one leaves", () => {
+    it.each(["settled", "same task", "no target"])(
+      "uses Escape to close an open list with replacement timing %s",
+      async (timing) => {
+        await mount();
+        controller().open();
+        const original = list();
+        const successor = original.cloneNode(true) as HTMLElement;
+        successor.hidden = true;
+        if (timing === "no target") original.remove();
+        else original.replaceWith(successor);
+        if (timing !== "same task") await tick();
+
+        const escapeEvent = pressKey(input(), "Escape");
+        expect(escapeEvent.defaultPrevented).toBe(true);
+        expect(input().getAttribute("aria-expanded")).toBe("false");
+        if (timing === "no target") root().append(successor);
+        await tick();
+        expect(successor.hidden).toBe(true);
+        expect(active()).toBeNull();
+      },
+    );
+
+    it("moves ArrowDown to the next option on the same task that replaces the open list", async () => {
+      await mount();
+      input().focus();
+      expect(active()).toBe("ms-apple");
+      const successor = list().cloneNode(true) as HTMLElement;
+      successor.hidden = true;
+      list().replaceWith(successor);
+
+      expect(pressKey(input(), "ArrowDown").defaultPrevented).toBe(true);
+      expect(successor.hidden).toBe(false);
+      await tick();
+      expect(successor.hidden).toBe(false);
+      expect(active()).toBe("ms-banana");
+    });
+
+    it("retains an open action taken before a replacement list arrives", async () => {
+      await mount();
+      const successor = list().cloneNode(true) as HTMLElement;
+      list().remove();
+      await tick();
+
+      controller().open();
+      expect(input().getAttribute("aria-expanded")).toBe("true");
+      root().append(successor);
+      await tick();
+      expect(successor.hidden).toBe(false);
+      expect(active()).toBe("ms-apple");
+    });
+
     it("keeps a list swapped in while open, with its active option", async () => {
       await mount();
       input().focus();
@@ -3324,7 +3451,7 @@ describe("MultiSelectController", () => {
       expect(tags().map((tag) => tag.dataset.value)).toEqual(["banana"]);
     });
 
-    it("does not commit a detached active option and falls back to the first visible target", async () => {
+    it("ignores an active option that loses its target token and falls back to the first visible target", async () => {
       await mount();
       // Focusing opens the list; close it so the key reaches the closed-state handler.
       input().focus();
@@ -3509,9 +3636,8 @@ describe("MultiSelectController", () => {
     });
 
     it("re-derives chips and fields when the candidate list is emptied", async () => {
-      // Replacing the list with an empty one never fires a *connected* callback,
-      // so only the disconnected side can stop the chips and hidden fields from
-      // advertising a selection whose option is gone.
+      // Emptying the existing list removes option targets without adding any. Their
+      // disconnection triggers reconciliation.
       await mountFields("", "apple");
       expect(tags().length).toBe(1);
       expect(fields().map((f) => f.value)).toEqual(["apple"]);
@@ -3862,6 +3988,17 @@ describe("MultiSelectController", () => {
       document.querySelector<HTMLElement>(
         "[data-stimeo--multi-select-target='empty']",
       ) as HTMLElement;
+
+    it("hides a stale empty message when open is called without an input", async () => {
+      await mountEmpty();
+      root().querySelector("input")?.remove();
+      emptyRegion().hidden = false;
+
+      controller().open();
+
+      expect(emptyRegion().hidden).toBe(true);
+      expect(root().querySelector("[role='listbox']")?.hasAttribute("hidden")).toBe(true);
+    });
 
     it("follows the empty result state in both directions", async () => {
       // The region belongs to the state the root reports as `data-…-empty`: a

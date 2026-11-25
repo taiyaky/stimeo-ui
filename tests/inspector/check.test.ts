@@ -539,7 +539,7 @@ describe("checkSource", () => {
         });
       });
 
-      it("rejects invalid Separator orientation, step, and bound order", () => {
+      it("rejects invalid Separator orientation and step", () => {
         expect(codes(`<div data-stimeo--separator-orientation-value="sideways"></div>`)).toContain(
           "invalid-value",
         );
@@ -756,8 +756,8 @@ describe("checkSource", () => {
       );
     });
 
-    it("offers no fix for an event the element resolves by default", () => {
-      // Nothing about the event is written down, so there is no range to replace.
+    it("has no unknown-action-event fix for an action whose event is omitted", () => {
+      // Check that an action using the element's default event exposes no unknown-action-event fix.
       const source = `<button data-controller="stimeo--toast" data-action="stimeo--toast#show"></button>`;
 
       expect(
@@ -1090,8 +1090,7 @@ describe("checkSource", () => {
       it("still judges a readable submit control when another one is generated", () => {
         // One half sits under a helper, so its own control cannot be read. That says
         // nothing about the control beside it, whose pair is plainly incomplete.
-        const diagnostics = checkSource(
-          `
+        const source = `
             <form data-controller="stimeo--submit-once">
               <button type="submit">
                 <%= tag.span data: { wrapper: true } do %>
@@ -1101,11 +1100,24 @@ describe("checkSource", () => {
               <button type="submit">
                 <span data-stimeo--submit-once-target="idle">Save</span>
               </button>
-            </form>`,
-          manifest,
+            </form>`;
+        const diagnostics = checkSource(source, manifest).filter(
+          (d) => d.code === "missing-conditional-target",
         );
 
-        expect(diagnostics.map((d) => d.code)).toContain("missing-conditional-target");
+        expect(diagnostics).toHaveLength(1);
+        expect(diagnostics[0]).toMatchObject({
+          severity: "error",
+          message:
+            '"stimeo--submit-once" requires "busy" in the same submit control as its "idle".',
+          line: 2,
+          column: 13,
+        });
+        const repaired = source.replace(
+          ">Save</span>",
+          `>Save</span><span data-stimeo--submit-once-target="busy" hidden>Saving</span>`,
+        );
+        expect(codes(repaired)).not.toContain("missing-conditional-target");
       });
 
       it("rejects a submit-once label pair split across two submit buttons", () => {
@@ -1175,10 +1187,9 @@ describe("checkSource", () => {
         ).not.toContain("missing-conditional-target");
       });
 
-      it("reports a half that reaches no submit control at all", () => {
-        // The walk up from the half is readable the whole way and finds no control,
-        // so at runtime it sits outside every one of them and swaps with none. That
-        // is decidable, unlike a chain a helper interrupts.
+      it("reports a missing pair when busy is outside the submit control containing idle", () => {
+        // The busy target outside the button cannot complete the idle/busy pair
+        // inside that submit control.
         expect(
           codes(`
             <form data-controller="stimeo--submit-once">
@@ -3318,7 +3329,7 @@ describe("checkSource", () => {
         expect(d?.suggestion).toBe('Did you mean "t"?');
       });
 
-      it("skips ERB-generated reference values and ids", () => {
+      it("skips an ERB-generated reference beside a static id", () => {
         const source = `
           <div data-controller="stimeo--tabs">
             <div role="tablist" aria-label="Generated tabs"
@@ -3326,30 +3337,73 @@ describe("checkSource", () => {
               <button role="tab" aria-controls="panel-<%= i %>"
                       data-stimeo--tabs-target="tab">A</button>
             </div>
-            <div role="tabpanel" id="panel-<%= i %>" data-stimeo--tabs-target="panel">A</div>
+            <div role="tabpanel" id="static-panel" data-stimeo--tabs-target="panel">A</div>
           </div>`;
         expect(codes(source)).not.toContain("unresolved-idref");
+      });
+
+      it("does not resolve a static reference through an ERB-generated id", () => {
+        const source = `
+          <div data-controller="stimeo--tabs">
+            <div role="tablist" aria-label="Generated tabs"
+                 data-stimeo--tabs-target="list">
+              <button role="tab" aria-controls="panel-"
+                      data-stimeo--tabs-target="tab">A</button>
+            </div>
+            <div role="tabpanel" id="panel-<%= i %>" data-stimeo--tabs-target="panel">A</div>
+          </div>`;
+        const diagnostics = checkSource(source, manifest).filter(
+          (d) => d.code === "unresolved-idref",
+        );
+
+        expect(diagnostics).toMatchObject([
+          {
+            severity: "warning",
+            message:
+              'aria-controls references id "panel-", but no element in this file declares it.',
+          },
+        ]);
       });
     });
 
     describe("suppression (data-stimeo-ignore)", () => {
       it("suppresses a listed code for the subtree and keeps others", () => {
         const bare = `
-          <div data-controller="stimeo--tabs" data-stimeo-ignore="missing-aria">
+          <div data-controller="stimeo--tabs">
             <div role="tablist" aria-label="Sections" data-stimeo--tabs-target="list">
-              <button data-stimeo--tabs-target="tab">A</button>
+              <button aria-controls="missing-panel" data-stimeo--tabs-target="tab">A</button>
             </div>
             <div aria-label="A" data-stimeo--tabs-target="panel">A</div>
           </div>`;
-        expect(codes(bare)).toEqual([]);
+        const diagnostics = checkSource(bare, manifest);
+        expect(diagnostics.filter((d) => d.code === "missing-aria")).toHaveLength(2);
+        const otherDiagnostics = diagnostics.filter((d) => d.code !== "missing-aria");
+        expect(otherDiagnostics).toMatchObject([
+          {
+            code: "unresolved-idref",
+            severity: "warning",
+            message:
+              'aria-controls references id "missing-panel", but no element in this file declares it.',
+          },
+        ]);
         expect(
-          codes(
+          checkSource(
             bare.replace(
-              'data-stimeo-ignore="missing-aria"',
-              'data-stimeo-ignore="unresolved-idref"',
+              'data-controller="stimeo--tabs"',
+              'data-controller="stimeo--tabs" data-stimeo-ignore="missing-aria"',
             ),
-          ).filter((c) => c === "missing-aria"),
-        ).toHaveLength(2);
+            manifest,
+          ),
+        ).toEqual(otherDiagnostics);
+        expect(
+          checkSource(
+            bare.replace(
+              'data-controller="stimeo--tabs"',
+              'data-controller="stimeo--tabs" data-stimeo-ignore="unresolved-idref"',
+            ),
+            manifest,
+          ),
+        ).toEqual(diagnostics.filter((d) => d.code !== "unresolved-idref"));
       });
 
       it("suppresses everything under an empty-valued ignore", () => {
@@ -3510,7 +3564,23 @@ describe("checkSource", () => {
         <div id="p2" data-stimeo--accordion-target="panel" hidden>body</div>
       </div>`;
 
-      expect(codes(source)).toContain("missing-conditional-target");
+      const diagnostics = checkSource(source, manifest).filter(
+        (d) => d.code === "missing-conditional-target",
+      );
+
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toMatchObject({
+        severity: "error",
+        message:
+          '"stimeo--accordion" requires "expandedLabel" in the same "trigger" as its "collapsedLabel".',
+        line: 2,
+        column: 7,
+      });
+      const repaired = source.replace(
+        ">Open</span>",
+        `>Open</span><span data-stimeo--accordion-target="expandedLabel" hidden>Close</span>`,
+      );
+      expect(codes(repaired)).not.toContain("missing-conditional-target");
     });
 
     /** The helper declares the trigger target while leaving its relationship to the label unknown. */
@@ -3737,6 +3807,8 @@ describe("checkSource", () => {
         manifest,
       );
       const d = diagnostics.find((x) => x.code === "unknown-target");
+      expect(d).toMatchObject({ code: "unknown-target", severity: "error" });
+      expect(d?.message).toContain('"xyzzyplughxyzzy"');
       expect(d?.suggestion).toBeUndefined();
     });
 

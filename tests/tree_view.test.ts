@@ -1164,12 +1164,12 @@ describe("TreeViewController", () => {
       const readme = byLabel("readme.md");
       const instance = controller();
       src.focus();
-      treeRoot.remove(); // the controller element itself left the document
+      treeRoot.remove();
+      src.remove();
       instance.itemTargetDisconnected(src);
-      // There is nothing to recover into: rewriting the tab stop (and focusing)
-      // on a detached tree while Stimulus drains its target callbacks would
-      // move the roving position for a widget that no longer exists.
-      expect(src.tabIndex).toBe(0);
+      // The detached tree can still resolve its surviving targets during teardown.
+      // They keep their authored positions until the tree returns.
+      expect(document.activeElement).toBe(document.body);
       expect(readme.tabIndex).toBe(-1);
     });
   });
@@ -2492,6 +2492,7 @@ describe("TreeViewController target API", () => {
     (inside) => {
       const group = document.createElement("div");
       group.setAttribute("role", "group");
+      group.setAttribute("data-stimeo--tree-view-target", "group");
       group.hidden = true;
       element("api-b").append(group);
       element("api-b").setAttribute("aria-expanded", "false");
@@ -2559,6 +2560,7 @@ describe("TreeViewController target API", () => {
     (source, initial, destination) => {
       const group = document.createElement("div");
       group.setAttribute("role", "group");
+      group.setAttribute("data-stimeo--tree-view-target", "group");
       group.hidden = true;
       const parent = element("api-b");
       parent.append(group);
@@ -2594,6 +2596,7 @@ describe("TreeViewController target API", () => {
   it("ignores toggling an undeclared host before accepting an owned parent", () => {
     const group = document.createElement("div");
     group.setAttribute("role", "group");
+    group.setAttribute("data-stimeo--tree-view-target", "group");
     group.hidden = true;
     element("api-b").append(group);
     element("api-b").setAttribute("aria-expanded", "false");
@@ -2610,6 +2613,7 @@ describe("TreeViewController target API", () => {
   it("rejects an unmarked toggle inside a nested scope before accepting the owned parent", () => {
     const group = document.createElement("div");
     group.setAttribute("role", "group");
+    group.setAttribute("data-stimeo--tree-view-target", "group");
     group.hidden = true;
     element("api-b").append(group);
     element("api-b").setAttribute("aria-expanded", "false");

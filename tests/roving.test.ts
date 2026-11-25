@@ -4,7 +4,7 @@ import { RovingController } from "../src/controllers/roving_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { press as keyboardPress, keyEvent, typeKey } from "./helpers/keyboard";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -19,15 +19,16 @@ describe("RovingController", () => {
 
   const mount = async (
     attrs = "",
-    tabindexes: [string, string, string] = ["0", "-1", "-1"],
+    tabindexes: [string | null, string | null, string | null] = ["0", "-1", "-1"],
     itemAttrs: [string, string, string] = ["", "", ""],
   ) => {
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <button id="outside">outside</button>
       <div id="group" data-controller="stimeo--roving" ${attrs}>
-        <button id="a" data-stimeo--roving-target="item" tabindex="${tabindexes[0]}" ${itemAttrs[0]}>A</button>
-        <button id="b" data-stimeo--roving-target="item" tabindex="${tabindexes[1]}" ${itemAttrs[1]}>B</button>
-        <button id="c" data-stimeo--roving-target="item" tabindex="${tabindexes[2]}" ${itemAttrs[2]}>C</button>
+        <button id="a" data-stimeo--roving-target="item" ${tabindexes[0] === null ? "" : `tabindex="${tabindexes[0]}"`} ${itemAttrs[0]}>A</button>
+        <button id="b" data-stimeo--roving-target="item" ${tabindexes[1] === null ? "" : `tabindex="${tabindexes[1]}"`} ${itemAttrs[1]}>B</button>
+        <button id="c" data-stimeo--roving-target="item" ${tabindexes[2] === null ? "" : `tabindex="${tabindexes[2]}"`} ${itemAttrs[2]}>C</button>
       </div>`;
     application = Application.start();
     application.register("stimeo--roving", RovingController);
@@ -47,6 +48,145 @@ describe("RovingController", () => {
   const tabindexes = () => ["#a", "#b", "#c"].map((id) => query(id).tabIndex);
   /** Focuses an item and returns the keydown event so cancellation remains observable. */
   const arrow = (from: string, key: string) => keyboardPress(query(from), key);
+
+  describe("borrowed tabindex", () => {
+    it.each(
+      (["live", "restored"] as const).flatMap((page) =>
+        [true, false].flatMap((authored) =>
+          (["token", "identifier"] as const).map((departure) => ({ page, authored, departure })),
+        ),
+      ),
+    )(
+      "returns authored tabindex on $page $departure departure (authored=$authored)",
+      async ({ page, authored, departure }) => {
+        await mount("", authored ? ["-1", "0", "-1"] : [null, null, null]);
+        const initialTargets = [query("#a"), query("#b"), query("#c")];
+        const second = initialTargets[1];
+        if (!second) throw new Error("Expected a second target");
+        keyboardPress(second, "Home");
+        expect(second.getAttribute("tabindex")).toBe("-1");
+        if (page === "restored") {
+          application = await restoreFromCache(application, (restored) =>
+            restored.register("stimeo--roving", RovingController),
+          );
+        }
+        const widget = group();
+        const targets = [query("#a"), query("#b"), query("#c")];
+        const departing = targets[1];
+        if (!departing) throw new Error("Expected a departing target");
+        if (departure === "token") departing.removeAttribute("data-stimeo--roving-target");
+        else widget.removeAttribute("data-controller");
+        await tick();
+
+        expect(departing.getAttribute("tabindex")).toBe(authored ? "0" : null);
+        expect(departing.hasAttribute("data-stimeo--roving-tabindex-lease")).toBe(false);
+        if (departure === "identifier") {
+          expect(targets.map((target) => target.getAttribute("tabindex"))).toEqual(
+            authored ? ["-1", "0", "-1"] : [null, null, null],
+          );
+          expect(
+            targets.some((target) => target.hasAttribute("data-stimeo--roving-tabindex-lease")),
+          ).toBe(false);
+        }
+      },
+    );
+
+    it.each(["5", null])(
+      "preserves a page-written tabindex of %s when the identifier is removed",
+      async (value) => {
+        await mount("", ["-1", "0", "-1"]);
+        const widget = group();
+        const targets = [query("#a"), query("#b"), query("#c")];
+        const second = targets[1];
+        if (!second) throw new Error("Expected a second target");
+        keyboardPress(second, "Home");
+        expect(second.getAttribute("tabindex")).toBe("-1");
+        if (value === null) second.removeAttribute("tabindex");
+        else second.setAttribute("tabindex", value);
+        widget.removeAttribute("data-controller");
+        await tick();
+
+        expect(second.getAttribute("tabindex")).toBe(value);
+        expect(second.hasAttribute("data-stimeo--roving-tabindex-lease")).toBe(false);
+      },
+    );
+
+    it("keeps current tabindex through root detach and reconnect", async () => {
+      await mount();
+      const widget = group();
+      const targets = [query("#a"), query("#b"), query("#c")];
+      const second = targets[1];
+      if (!second) throw new Error("Expected a second target");
+      keyboardPress(second, "End");
+      const before = targets.map((target) => target.outerHTML);
+      widget.remove();
+      await tick();
+      expect(targets.map((target) => target.outerHTML)).toEqual(before);
+      document.body.append(widget);
+      await tick();
+      expect(targets.map((target) => target.getAttribute("tabindex"))).toEqual(["-1", "-1", "0"]);
+    });
+
+    it("keeps the active target without tabindex writes during a move inside its scope", async () => {
+      await mount();
+      const widget = group();
+      const targets = [query("#a"), query("#b"), query("#c")];
+      const first = targets[0];
+      const second = targets[1];
+      if (!first || !second) throw new Error("Expected two targets");
+      keyboardPress(first, "ArrowRight");
+      expect(second.getAttribute("tabindex")).toBe("0");
+      const records: MutationRecord[] = [];
+      const observer = new MutationObserver((batch) => records.push(...batch));
+      observer.observe(widget, { attributes: true, subtree: true, attributeFilter: ["tabindex"] });
+      try {
+        widget.insertBefore(second, second.nextSibling);
+        await tick();
+        records.push(...observer.takeRecords());
+      } finally {
+        observer.disconnect();
+      }
+      expect(targets.map((target) => target.getAttribute("tabindex"))).toEqual(["-1", "0", "-1"]);
+      expect(records).toEqual([]);
+    });
+
+    it.each(["0", "7", null])(
+      "returns a runtime target's authored tabindex of %s",
+      async (original) => {
+        await mount();
+        const widget = group();
+        const existing = query("#a");
+        if (!existing) throw new Error("Expected an existing target");
+        const inserted = document.createElement("button");
+        inserted.setAttribute("data-stimeo--roving-target", "item");
+        if (original !== null) inserted.setAttribute("tabindex", original);
+        widget.prepend(inserted);
+        await tick();
+        expect(inserted.getAttribute("tabindex")).toBe("-1");
+        inserted.removeAttribute("data-stimeo--roving-target");
+        await tick();
+        expect(inserted.getAttribute("tabindex")).toBe(original);
+        inserted.setAttribute("data-stimeo--roving-target", "item");
+        await tick();
+        expect(inserted.getAttribute("tabindex")).toBe("-1");
+        expect(existing.getAttribute("tabindex")).toBe("0");
+      },
+    );
+
+    it("returns tabindex when the controller element is its own target", async () => {
+      const html = `<div id="group" data-controller="stimeo--roving" data-stimeo--roving-target="item"
+        role="toolbar" aria-label="Actions" tabindex="-1">Action</div>`;
+      document.body.innerHTML = html;
+      application = Application.start();
+      application.register("stimeo--roving", RovingController);
+      await tick();
+      const widget = group();
+      expect(widget.getAttribute("tabindex")).toBe("0");
+      widget.removeAttribute("data-controller");
+      await tick();
+      expect(widget.getAttribute("tabindex")).toBe("-1");
+    });
+  });
 
   it("makes exactly one item tabbable, keeping an existing tab stop on connect", async () => {
     // The middle item is the authored tab stop — connect must preserve it (DOM is
@@ -359,6 +499,32 @@ describe("RovingController", () => {
     await tick();
     expect(d.tabIndex).toBe(0);
     expect(query("#a").tabIndex).toBe(-1);
+  });
+
+  it("reconciles the Tab stop to the focused item when a morph rewrites both stops", async () => {
+    await mount();
+    const focused = query("#c");
+    focused.focus();
+    expect(focused.tabIndex).toBe(0);
+    query("#a").tabIndex = 0;
+    focused.tabIndex = -1;
+
+    group().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(document.activeElement).toBe(focused);
+    expect(tabindexes()).toEqual([-1, -1, 0]);
+  });
+
+  it("gives the first reachable item added to a disabled group the Tab stop", async () => {
+    await mount("", ["-1", "-1", "-1"], ["disabled", "disabled", "disabled"]);
+    const added = document.createElement("button");
+    added.setAttribute("data-stimeo--roving-target", "item");
+    group().append(added);
+    await tick();
+
+    expect(added.tabIndex).toBe(0);
+    expect(tabindexes()).toEqual([-1, -1, -1]);
   });
 
   it("keeps the authored tab stop on connect when focus sits on another item", async () => {

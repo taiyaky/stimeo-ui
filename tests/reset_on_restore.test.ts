@@ -83,7 +83,7 @@ describe("ResetOnRestoreController", () => {
         .getAttributeNames()
         .filter((name) => name.endsWith("-lived"));
       expect(mark).toEqual(["data-stimeo--reset-on-restore-lived"]);
-      // A Turbo morph keeps only the attributes the server sent.
+      // Model a morph that retains the element and removes its lived mark.
       root().removeAttribute("data-stimeo--reset-on-restore-lived");
       root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
       await flushMicrotasks();

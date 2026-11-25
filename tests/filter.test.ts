@@ -97,16 +97,80 @@ describe("FilterController", () => {
     expect(items()[1]?.hidden).toBe(true);
   });
 
-  it("hides a group with no visible item and reveals the empty element", async () => {
+  it("switches between a matching group and the empty element", async () => {
     await mount(
       `${control("a")}
        <section data-stimeo--filter-target="group">${item("b")}</section>
        <p data-stimeo--filter-target="empty" hidden>none</p>`,
     );
+    const group = query<HTMLElement>("[data-stimeo--filter-target='group']");
+    const empty = query<HTMLElement>("[data-stimeo--filter-target='empty']");
     setChecked(query<HTMLInputElement>("input"), true);
 
+    expect(group.hidden).toBe(true);
+    expect(empty.hidden).toBe(false);
+
+    controllerFor().clear();
+
+    expect(group.hidden).toBe(false);
+    expect(empty.hidden).toBe(true);
+  });
+
+  it("counts authored-hidden items as hidden and keeps their exact hidden value", async () => {
+    await mount(
+      `${control("a")}
+       <section data-stimeo--filter-target="group">
+         <p id="authored" hidden="until-found" data-stimeo--filter-target="item"
+            data-stimeo--filter-tokens="a">A</p>
+       </section>
+       ${item("b")}
+       <p data-stimeo--filter-target="empty" hidden>none</p>`,
+    );
+    const authored = query<HTMLElement>("#authored");
+    const onChange = vi.fn();
+    root().addEventListener("stimeo--filter:change", onChange);
+    setChecked(query<HTMLInputElement>("input"), true);
+
+    expect(authored.getAttribute("hidden")).toBe("until-found");
     expect(query<HTMLElement>("[data-stimeo--filter-target='group']").hidden).toBe(true);
     expect(query<HTMLElement>("[data-stimeo--filter-target='empty']").hidden).toBe(false);
+    expect(onChange.mock.calls[0]?.[0]?.detail).toEqual({
+      active: ["a"],
+      visibleCount: 0,
+      total: 2,
+    });
+
+    controllerFor().clear();
+    expect(authored.getAttribute("hidden")).toBe("until-found");
+    expect(onChange.mock.calls[1]?.[0]?.detail.visibleCount).toBe(1);
+  });
+
+  it("keeps a page's later hidden value through a nonmatch and clear", async () => {
+    await mount(`${control("a")}${item("b")}`);
+    const target = items()[0] as HTMLElement;
+    setChecked(query<HTMLInputElement>("input"), true);
+    target.setAttribute("hidden", "until-found");
+
+    controllerFor().apply();
+    expect(target.getAttribute("hidden")).toBe("until-found");
+    controllerFor().clear();
+    expect(target.getAttribute("hidden")).toBe("until-found");
+    expect(target.hasAttribute("data-stimeo--filter-hidden-lease")).toBe(false);
+  });
+
+  it("returns hidden only after an element loses its final visibility target role", async () => {
+    await mount(`<p id="shared" data-stimeo--filter-target="item empty"></p>${item("b")}`);
+    const shared = query<HTMLElement>("#shared");
+    expect(shared.hidden).toBe(true);
+
+    shared.setAttribute("data-stimeo--filter-target", "empty");
+    await tick();
+    expect(shared.hidden).toBe(true);
+
+    shared.removeAttribute("data-stimeo--filter-target");
+    await tick();
+    expect(shared.hasAttribute("hidden")).toBe(false);
+    expect(shared.hasAttribute("data-stimeo--filter-hidden-lease")).toBe(false);
   });
 
   it("clear() turns every control off and restores all items", async () => {

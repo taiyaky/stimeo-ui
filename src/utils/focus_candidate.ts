@@ -240,6 +240,23 @@ function sameRadioGroup(a: HTMLInputElement, b: HTMLInputElement): boolean {
 }
 
 /**
+ * Whether the element is an unchecked radio whose group has a checked radio that is a
+ * Tab stop ({@link isTabStop}). Sequential navigation stops on such a group's checked
+ * radio only, so the element is no Tab stop even when {@link isTabStop} accepts it. A
+ * checked radio that is no Tab stop itself (disabled, hidden, unrendered, or with a
+ * negative `tabindex`) leaves its group as if nothing were checked. The group is HTML's:
+ * the same non-empty `name`, the same form owner and the same tree.
+ */
+export function isUncheckedRadioInCheckedGroup(element: Element): boolean {
+  if (!isRadio(element) || element.checked) return false;
+  const root = element.getRootNode() as ParentNode;
+  return Array.from(root.querySelectorAll("input")).some(
+    (other) =>
+      isRadio(other) && other.checked && sameRadioGroup(other, element) && isTabStop(other),
+  );
+}
+
+/**
  * Whether the element is part of editable content: the nearest ancestor that sets a valid
  * `contenteditable` decides. `false` ends the editable region (a non-editable island
  * inside an editor); an invalid value inherits from further up.
@@ -348,10 +365,19 @@ interface ScopeEntry {
   readonly stops: TabStopElement[];
 }
 
+/**
+ * How a move relates to the element it starts from: on the element itself, from a
+ * position just before it (it and what it holds come after), or from a position just
+ * after everything it holds (it and what it holds come before).
+ */
+type StartSide = "on" | "before" | "after";
+
 /** What a walk of the order records besides the order itself. */
 interface OrderWalk {
   /** The element a move starts from. */
   readonly from: Element | null;
+  /** How the move relates to `from`. */
+  readonly side: StartSide;
   /** Every stop, in flat-tree order. */
   readonly tree: TabStopElement[];
   /**
@@ -372,7 +398,8 @@ interface OrderWalk {
 function orderScope(elements: Element[], walk: OrderWalk): TabStopElement[] {
   const entries: ScopeEntry[] = [];
   const visit = (element: Element): void => {
-    if (element === walk.from) walk.fromAt = walk.tree.length;
+    const isFrom = element === walk.from;
+    if (isFrom && walk.side !== "after") walk.fromAt = walk.tree.length;
     const tabindex = authoredTabindex(element) ?? 0;
     let stop: TabStopElement | null = null;
     if (
@@ -386,15 +413,27 @@ function orderScope(elements: Element[], walk: OrderWalk): TabStopElement[] {
     if (owned) {
       if (tabindex >= 0) {
         entries.push({ tabindex, stops: [...(stop ? [stop] : []), ...orderScope(owned, walk)] });
-      } else if (walk.from && flatTreeContains(element, walk.from)) {
+      } else if (
+        walk.from &&
+        flatTreeContains(element, walk.from) &&
+        (!isFrom || walk.side === "on")
+      ) {
         walk.fromAt = walk.tree.length;
         walk.excludedScope = element;
-        orderScope(owned, { from: walk.from, tree: walk.tree, fromAt: -1, excludedScope: null });
+        orderScope(owned, {
+          from: walk.from,
+          side: walk.side,
+          tree: walk.tree,
+          fromAt: -1,
+          excludedScope: null,
+        });
       }
+      if (isFrom && walk.side === "after") walk.fromAt = walk.tree.length;
       return;
     }
     if (stop) entries.push({ tabindex, stops: [stop] });
     for (const child of Array.from(element.children)) visit(child);
+    if (isFrom && walk.side === "after") walk.fromAt = walk.tree.length;
   };
   for (const element of elements) visit(element);
   const positive = entries.filter((entry) => entry.tabindex > 0);
@@ -410,15 +449,17 @@ interface RadioContext {
 }
 
 /**
- * Whether a candidate passes the radio-group rule the engine applies: a checked radio
- * among the stops always does; an unchecked one only as the first radio of a group with
- * no checked stop, and not while focus is on a radio of that group. `tree` is the walk's
- * stops in flat-tree order, so a group is counted within the walked root only.
+ * Whether a candidate passes the radio-group rule: a checked radio among the stops
+ * always does; an unchecked one only as the first radio going forward, or the last
+ * going backward, of a group with no checked stop, and not while focus is on a radio
+ * of that group. `tree` is the walk's stops in flat-tree order, so a group is counted
+ * within the walked root only. A former focused member is not remembered.
  */
 function passesRadioRule(
   element: TabStopElement,
   tree: TabStopElement[],
   focusedRadio: HTMLInputElement | null,
+  backward: boolean,
 ): boolean {
   if (!isRadio(element) || element.checked) return true;
   const group = tree.filter(
@@ -426,16 +467,17 @@ function passesRadioRule(
       stop === element || (isRadio(stop) && sameRadioGroup(stop, element)),
   );
   if (group.some((radio) => radio.checked)) return false;
-  if (group[0] !== element) return false;
+  if (group[backward ? group.length - 1 : 0] !== element) return false;
   return focusedRadio === null || !sameRadioGroup(focusedRadio, element);
 }
 
 /**
  * The index in `order` a move from the walk's `from` visits first. A start the walk did
  * not meet is outside: the move enters at the first stop, or the last going backward. A
- * start that is a stop moves one place along the order. Any other start (the root, an
- * element with a negative `tabindex`) moves to the nearest stop after it in tree order,
- * or before it going backward. With no neighbour it returns the boundary beyond that end.
+ * start on a stop moves one place along the order. Any other start (the root, an
+ * element with a negative `tabindex`, a position before or after an element) moves to the
+ * nearest stop after it in tree order, or before it going backward. With no neighbour it
+ * returns the boundary beyond that end.
  */
 function startIndex(
   order: TabStopElement[],
@@ -444,7 +486,7 @@ function startIndex(
   isStop: (element: TabStopElement) => boolean,
 ): number {
   if (walk.fromAt < 0) return backward ? order.length - 1 : 0;
-  const at = order.indexOf(walk.from as TabStopElement);
+  const at = walk.side === "on" ? order.indexOf(walk.from as TabStopElement) : -1;
   if (at >= 0) return backward ? at - 1 : at + 1;
   const neighbour = backward
     ? walk.tree.slice(0, walk.fromAt).reverse().find(isStop)
@@ -463,9 +505,12 @@ function movesWithin(
   backward: boolean,
   wrap: boolean,
   radioContext?: RadioContext,
+  side: StartSide = "on",
+  position: { readonly holder: Element | null } = { holder: null },
 ): TabStopElement[] {
   const walk: OrderWalk = {
     from,
+    side,
     tree: [],
     fromAt: from === root ? 0 : -1,
     excludedScope: null,
@@ -473,27 +518,153 @@ function movesWithin(
   const order = orderScope(ownedScope(root) ?? Array.from(root.children), walk);
   const radios = radioContext ?? {
     tree: walk.tree,
-    focusedRadio: walk.fromAt >= 0 && isRadio(from) ? from : null,
+    focusedRadio: side === "on" && walk.fromAt >= 0 && isRadio(from) ? from : null,
   };
   const isStop = (element: TabStopElement): boolean =>
-    passesRadioRule(element, radios.tree, radios.focusedRadio);
+    passesRadioRule(element, radios.tree, radios.focusedRadio, backward);
+  const holds = (element: TabStopElement): boolean =>
+    position.holder !== null && flatTreeContains(element, position.holder);
   const start = startIndex(
     order,
     walk,
     backward,
-    (element) => order.includes(element) && isStop(element),
+    (element) => order.includes(element) && isStop(element) && !holds(element),
   );
   const remaining = backward ? order.slice(0, start + 1).reverse() : order.slice(start);
   const wrapped = wrap ? (backward ? order.slice(start + 1).reverse() : order.slice(0, start)) : [];
   const excluded = walk.excludedScope;
   const prefix =
     excluded && !(backward && from === excluded)
-      ? movesWithin(excluded, from === excluded ? null : from, backward, false, radios)
+      ? movesWithin(
+          excluded,
+          from === excluded ? null : from,
+          backward,
+          false,
+          radios,
+          side,
+          position,
+        )
       : [];
   return [
     ...prefix,
-    ...[...remaining, ...wrapped].filter((element) => element !== from && isStop(element)),
+    ...[...remaining, ...wrapped].filter(
+      (element) => (side !== "on" || element !== from) && isStop(element),
+    ),
   ];
+}
+
+/**
+ * The parent of `node` in the flat tree: the slot of its parent's open shadow root it is
+ * assigned to (its parent when no slot shows it), the host of the shadow root it is a child of,
+ * or its parent.
+ */
+function flatParentNode(node: Node): Node | null {
+  const parent = node.parentNode;
+  if (parent instanceof Element && parent.shadowRoot) {
+    for (const slot of parent.shadowRoot.querySelectorAll("slot")) {
+      if (slot.assignedNodes().includes(node as ChildNode)) return slot;
+    }
+  }
+  return parent instanceof ShadowRoot ? parent.host : parent;
+}
+
+/**
+ * The children of `node` in the flat tree, text included: its open shadow root's
+ * children, a slot's assigned nodes (its own children when nothing is assigned to it), or
+ * its children.
+ */
+function flatChildNodes(node: Node): Node[] {
+  if (node instanceof Element && node.shadowRoot) return Array.from(node.shadowRoot.childNodes);
+  if (node instanceof HTMLSlotElement) {
+    const assigned = node.assignedNodes();
+    return assigned.length > 0 ? assigned : Array.from(node.childNodes);
+  }
+  return Array.from(node.childNodes);
+}
+
+/**
+ * The node after `node` and everything it holds in the flat tree, below `root`, or `null`.
+ * A node outside the flat tree (unassigned to any slot) climbs to its parent.
+ */
+function flatNodeAfter(node: Node, root: Node): Node | null {
+  for (let current: Node | null = node; current && current !== root; ) {
+    const parent = flatParentNode(current);
+    if (!parent) return null;
+    const siblings = flatChildNodes(parent);
+    const index = siblings.indexOf(current);
+    const next = index >= 0 ? siblings[index + 1] : undefined;
+    if (next) return next;
+    current = parent;
+  }
+  return null;
+}
+
+/** The last element before `node` in the flat tree that does not hold it, below `root`. */
+function flatElementBefore(node: Node, root: Node): Element | null {
+  for (let current: Node | null = node; current && current !== root; ) {
+    const parent = flatParentNode(current);
+    if (!parent) return null;
+    const siblings = flatChildNodes(parent);
+    for (let index = siblings.indexOf(current) - 1; index >= 0; index--) {
+      const sibling = siblings[index];
+      if (sibling instanceof Element) return sibling;
+    }
+    current = parent;
+  }
+  return null;
+}
+
+/**
+ * The first element at or after the position (`container`, `offset`) in the flat tree,
+ * below `root`: the element the position comes just before. The position sits before the
+ * child at `offset`, or else just after the child before it; with no child on either side
+ * it sits at the start of what `container` holds in the flat tree (a host with no children
+ * of its own holds its shadow root's), or, holding nothing, where `container` ends. A
+ * child of a host is read where the flat tree puts it, in its slot.
+ */
+function elementAfterPosition(container: Node, offset: number, root: Node): Element | null {
+  const owner = container instanceof ShadowRoot ? container.host : container;
+  const child = container.childNodes[offset];
+  const previous = container.childNodes[offset - 1];
+  let node: Node | null =
+    child ??
+    (previous
+      ? flatNodeAfter(previous, root)
+      : (flatChildNodes(owner)[0] ?? flatNodeAfter(owner, root)));
+  while (node && !(node instanceof Element)) {
+    node = flatChildNodes(node)[0] ?? flatNodeAfter(node, root);
+  }
+  return node;
+}
+
+/**
+ * The last element whose content ends at or before the position (`container`, `offset`) in
+ * the flat tree, below `root`: the element the position comes just after. That is the child
+ * before the position when it is an element, else the last element before it; with no child
+ * on either side, the last element before `container`.
+ */
+function elementBeforePosition(container: Node, offset: number, root: Node): Element | null {
+  const child = container.childNodes[offset];
+  if (child) return flatElementBefore(child, root);
+  const previous = container.childNodes[offset - 1];
+  if (previous) return previous instanceof Element ? previous : flatElementBefore(previous, root);
+  return flatElementBefore(container instanceof ShadowRoot ? container.host : container, root);
+}
+
+/**
+ * The element the position (`container`, `offset`) lies in, in the flat tree: among a shadow
+ * host's own children, the slot the child beside the position is shown in (the host when no
+ * slot shows it); in a text node, the slot it is shown in or its parent; in a shadow root, its
+ * host; else `container` itself.
+ */
+export function elementHoldingPosition(container: Node, offset: number): Element | null {
+  if (container instanceof Element && container.shadowRoot) {
+    const near = container.childNodes[offset] ?? container.childNodes[offset - 1];
+    return near ? (flatParentNode(near) as Element) : container;
+  }
+  if (container instanceof Element) return container;
+  if (container instanceof ShadowRoot) return container.host;
+  return flatParentNode(container) as Element | null;
 }
 
 /**
@@ -507,23 +678,47 @@ function movesWithin(
  * are walked in flat-tree order, slots expanded, each scope ordered on its own; a closed
  * shadow root is not read. A radio group, counted within `root`, stops once: on its
  * checked radio when that radio can take focus, even with focus elsewhere in the group,
- * and otherwise on its first radio that can, unless focus is already in the group.
+ * and otherwise on its first radio that can going forward, or its last going backward,
+ * unless focus is already in the group. A former focused member is not remembered.
  * A link inside editable content without its own `tabindex` is not a stop. Every stop
  * also passes its applicable focusability and rendering checks.
+ * A move from an element outside the order (the root, an element that is not focusable, one
+ * with a negative `tabindex` that owns no excluded scope) goes to the nearest stop after it
+ * in flat-tree order, or before it when `backward`, whatever the `tabindex` values: from
+ * past the last stop of an open shadow root, that is the first stop after its host. A radio
+ * the group rule passes over moves from its place in the order.
  * A negative-tabindex shadow host or slot excludes its scope from entry. A move starting
- * on that owner or a stop inside its scope finishes the local order in the requested direction,
- * then continues outside; wrapping does not re-enter the excluded scope.
+ * on that owner or on any element inside its scope finishes the local order in the requested
+ * direction, then continues outside; wrapping does not re-enter the excluded scope.
+ *
+ * A `from` that is a range is a position: a move forward starts at the range's end, a move
+ * backward at its start. The next stop is the nearest one at or after that position in
+ * flat-tree order (going backward, the nearest one whose content ends at or before it),
+ * whatever the `tabindex` values, as from an element outside the order. A range around an
+ * element therefore moves past it both ways, and a collapsed range keeps its place when the
+ * element it was beside leaves. A stop that holds the position counts as neither before nor
+ * after it: from inside a button's label the move goes to the stop after or before that button,
+ * and from inside a region with `tabindex="0"` to the region's stops around the position.
  *
  * @param root - The element whose descendants are ordered; it is not a stop itself.
- * @param from - Where the move starts, usually {@link deepActiveElement}.
+ * @param from - Where the move starts: an element, usually {@link deepActiveElement}, or a
+ *   position as a range.
  * @param backward - Whether the move goes backward (`Shift+Tab`).
  */
 export function sequentialTabStops(
   root: Element,
-  from: Element | null = null,
+  from: Element | Range | null = null,
   backward = false,
 ): TabStopElement[] {
-  return movesWithin(root, from, backward, true);
+  if (!(from instanceof Range)) return movesWithin(root, from, backward, true);
+  const container = backward ? from.startContainer : from.endContainer;
+  const offset = backward ? from.startOffset : from.endOffset;
+  const anchor = backward
+    ? elementBeforePosition(container, offset, root)
+    : elementAfterPosition(container, offset, root);
+  return movesWithin(root, anchor, backward, true, undefined, backward ? "after" : "before", {
+    holder: elementHoldingPosition(container, offset),
+  });
 }
 
 /**

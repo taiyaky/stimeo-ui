@@ -25,13 +25,22 @@
 export class RovingTabindex {
   /** Returns the current ordered item elements; called on every operation. */
   readonly #getItems: () => HTMLElement[];
+  /** Writes the policy owner's tabindex, or the primitive's default property value. */
+  readonly #write: (item: HTMLElement, tabindex: 0 | -1) => void;
 
   /**
    * @param getItems - Returns the current ordered item elements. Called on every
    *   operation so the live target list is always used.
+   * @param write - Optional attribute writer, such as a controller's ownership lease.
    */
-  constructor(getItems: () => HTMLElement[]) {
+  constructor(
+    getItems: () => HTMLElement[],
+    write: (item: HTMLElement, tabindex: 0 | -1) => void = (item, tabindex) => {
+      item.tabIndex = tabindex;
+    },
+  ) {
     this.#getItems = getItems;
+    this.#write = write;
   }
 
   /** Index of the currently tabbable item (`tabindex="0"`), or `-1` if none. */
@@ -56,7 +65,7 @@ export class RovingTabindex {
     const { focus = false } = options;
     const items = options.items ?? this.#getItems();
     items.forEach((item, i) => {
-      item.tabIndex = i === index ? 0 : -1;
+      this.#write(item, i === index ? 0 : -1);
     });
     if (focus) items[index]?.focus();
   }

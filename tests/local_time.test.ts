@@ -9,16 +9,6 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link LocalTimeController}: UTC→locale/zone formatting,
- * timezone conversion, locale/timeZone overrides, date-only output, the optional
- * title, `datetime` preservation, graceful fallbacks, and the format event.
- *
- * Display output is asserted against a reference `Intl.DateTimeFormat` built with
- * the same options, so the tests verify the controller wires the options through
- * without pinning brittle, ICU-version-specific strings.
- */
-
 /** The fixed UTC instant under test (12:30 UTC on 2026-06-08). */
 const ISO = "2026-06-08T12:30:00Z";
 
@@ -76,6 +66,15 @@ describe("withRuntimeTimeZone", () => {
   });
 });
 
+/**
+ * Behavioral tests for {@link LocalTimeController}: UTC→locale/zone formatting,
+ * timezone conversion, locale/timeZone overrides, date-only output, the optional
+ * title, `datetime` preservation, graceful fallbacks, and the format event.
+ *
+ * Display output is asserted against a reference `Intl.DateTimeFormat` built with
+ * the same options, so the tests verify the controller wires the options through
+ * without pinning brittle, ICU-version-specific strings.
+ */
 describe("LocalTimeController", () => {
   let application: Application;
 
@@ -106,7 +105,7 @@ describe("LocalTimeController", () => {
     );
   });
 
-  it("converts the instant into the viewer's timezone (west of UTC)", async () => {
+  it("converts the instant to an explicitly configured timezone west of UTC", async () => {
     // 12:30 UTC is 08:30 in New York (EDT, UTC-4) in June.
     await start(
       'data-stimeo--local-time-locale-value="en-US" ' +

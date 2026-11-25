@@ -762,15 +762,15 @@ describe("DismissibleController", () => {
       expect(departed.getAttribute("data-state")).toBe("settling");
     });
 
-    it("leaves a dismissed root that stops being one as the dismissal left it", async () => {
+    it("returns a dismissed root that stops being one to its authored state", async () => {
       await start(hide_markup);
       const departed = root();
       query("button", departed).click();
 
       await dropRootToken(departed);
 
-      expect(departed.hidden).toBe(true);
-      expect(departed.getAttribute("data-state")).toBe("closing");
+      expect(departed.hasAttribute("hidden")).toBe(false);
+      expect(departed.hasAttribute("data-state")).toBe(false);
     });
 
     /**
@@ -783,7 +783,7 @@ describe("DismissibleController", () => {
       instance.connect();
     };
 
-    it("leaves the closing a dismissal wrote on a root that stops being one after the host moved", async () => {
+    it("returns dismissed attributes when the root stops being one after the host moved", async () => {
       await start(hide_markup);
       const departed = root();
       query("button", departed).click();
@@ -792,8 +792,8 @@ describe("DismissibleController", () => {
       departed.removeAttribute("data-stimeo--dismissible-target");
       controller().rootTargetDisconnected(departed);
 
-      expect(departed.hidden).toBe(true);
-      expect(departed.getAttribute("data-state")).toBe("closing");
+      expect(departed.hasAttribute("hidden")).toBe(false);
+      expect(departed.hasAttribute("data-state")).toBe(false);
     });
 
     it("keeps a data-state the page wrote after the open default once the host moved", async () => {
@@ -808,7 +808,7 @@ describe("DismissibleController", () => {
       expect(departed.getAttribute("data-state")).toBe("settling");
     });
 
-    it("keeps the closing a dismissal wrote on a restored root that stops being one", async () => {
+    it("returns dismissed attributes on a restored root that stops being one", async () => {
       await start(hide_markup);
       query("button", root()).click();
       application = await restoreFromCache(application, (restored) =>
@@ -819,8 +819,8 @@ describe("DismissibleController", () => {
       departed.removeAttribute("data-stimeo--dismissible-target");
       controller().rootTargetDisconnected(departed);
 
-      expect(departed.hidden).toBe(true);
-      expect(departed.getAttribute("data-state")).toBe("closing");
+      expect(departed.hasAttribute("hidden")).toBe(false);
+      expect(departed.hasAttribute("data-state")).toBe(false);
       expect(departed.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
     });
 
@@ -892,6 +892,246 @@ describe("DismissibleController", () => {
 
       expect(kept.getAttribute("data-state")).toBe("open");
     });
+  });
+
+  describe("native radio groups around a dismissed root", () => {
+    for (const mode of ["hide", "remove"]) {
+      for (const direction of ["next", "previous"]) {
+        for (const checked of [false, true]) {
+          it(`retreats ${direction} to the ${checked ? "checked" : "directional"} radio in ${mode} mode`, async () => {
+            const notice = `<div data-controller="stimeo--dismissible"
+              data-stimeo--dismissible-mode-value="${mode}">
+              <div data-stimeo--dismissible-target="root">
+                <button id="close" data-action="stimeo--dismissible#dismiss">Close</button>
+              </div>
+            </div>`;
+            const radios = `<input type="radio" name="choice" id="radio-1">
+              <input type="radio" name="choice" id="radio-2" ${checked ? "checked" : ""}>
+              <input type="radio" name="choice" id="radio-3">`;
+            await start(direction === "next" ? notice + radios : radios + notice);
+            byId("close").focus();
+
+            byId("close").click();
+
+            const expected = checked ? "radio-2" : direction === "next" ? "radio-1" : "radio-3";
+            expect(document.activeElement).toBe(byId(expected));
+          });
+        }
+      }
+    }
+  });
+
+  describe("dismissed roots returned to the page", () => {
+    const markup = (attributes = "") => `
+      <button id="outside">Outside</button>
+      <div id="notice" data-controller="stimeo--dismissible"
+           data-stimeo--dismissible-mode-value="hide">
+        <div id="notice-root" data-stimeo--dismissible-target="root" ${attributes}>
+          <button id="close" data-action="stimeo--dismissible#dismiss">Close</button>
+        </div>
+        <div id="destination"></div>
+      </div>`;
+
+    const depart = async (element: HTMLElement, departure: "token" | "identifier") => {
+      if (departure === "token") element.removeAttribute("data-stimeo--dismissible-target");
+      else byId("notice").removeAttribute("data-controller");
+      await tick();
+    };
+
+    it.each([
+      {
+        attributes: 'hidden="until-found" data-state="custom"',
+        hidden: "until-found",
+        state: "custom",
+      },
+      { attributes: 'hidden="hidden" data-state=""', hidden: "hidden", state: "" },
+    ])("returns exact authored values: $attributes", async ({ attributes, hidden, state }) => {
+      await start(markup(attributes));
+      controller().dismiss();
+      const departed = byId("notice-root");
+      expect(departed.getAttribute("hidden")).toBe("");
+      expect(departed.getAttribute("data-state")).toBe("closing");
+
+      await depart(departed, "token");
+
+      expect(departed.getAttribute("hidden")).toBe(hidden);
+      expect(departed.getAttribute("data-state")).toBe(state);
+    });
+
+    it.each(["token", "identifier"] as const)(
+      "keeps later page writes on %s departure",
+      async (departure) => {
+        await start(markup());
+        byId("close").click();
+        const departed = byId("notice-root");
+        departed.setAttribute("hidden", "until-found");
+        departed.setAttribute("data-state", "page-state");
+
+        await depart(departed, departure);
+
+        expect(departed.getAttribute("hidden")).toBe("until-found");
+        expect(departed.getAttribute("data-state")).toBe("page-state");
+        expect(departed.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+      },
+    );
+
+    it.each(["token", "identifier"] as const)(
+      "keeps later page removals on %s departure",
+      async (departure) => {
+        await start(markup('hidden="until-found" data-state="custom"'));
+        controller().dismiss();
+        const departed = byId("notice-root");
+        departed.removeAttribute("hidden");
+        departed.removeAttribute("data-state");
+
+        await depart(departed, departure);
+
+        expect(departed.hasAttribute("hidden")).toBe(false);
+        expect(departed.hasAttribute("data-state")).toBe(false);
+        expect(departed.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+      },
+    );
+
+    it("keeps a dismissal when the root moves inside the same scope", async () => {
+      await start(markup());
+      byId("close").click();
+      const moving = byId("notice-root");
+
+      byId("destination").append(moving);
+      await tick();
+
+      expect(moving.hidden).toBe(true);
+      expect(moving.getAttribute("data-state")).toBe("closing");
+      await depart(moving, "token");
+      expect(moving.hasAttribute("hidden")).toBe(false);
+      expect(moving.hasAttribute("data-state")).toBe(false);
+    });
+
+    it("keeps a dismissal when the whole host moves inside the page", async () => {
+      await start(markup());
+      byId("close").click();
+      const moving = byId("notice");
+
+      document.body.append(moving);
+      await tick();
+
+      expect(byId("notice-root").hidden).toBe(true);
+      expect(byId("notice-root").getAttribute("data-state")).toBe("closing");
+      await depart(byId("notice-root"), "token");
+      expect(byId("notice-root").hasAttribute("hidden")).toBe(false);
+      expect(byId("notice-root").hasAttribute("data-state")).toBe(false);
+    });
+
+    it("keeps a dismissal and its records while the whole host leaves the page", async () => {
+      await start(markup());
+      byId("close").click();
+      const moving = byId("notice");
+      const kept = byId("notice-root");
+      const attributes = kept.outerHTML;
+
+      moving.remove();
+      await tick();
+
+      expect(kept.outerHTML).toBe(attributes);
+      document.body.append(moving);
+      await tick();
+      expect(kept.hidden).toBe(true);
+      expect(kept.getAttribute("data-state")).toBe("closing");
+      await depart(kept, "token");
+      expect(kept.hasAttribute("hidden")).toBe(false);
+      expect(kept.hasAttribute("data-state")).toBe(false);
+    });
+
+    it("keeps a dismissal on the live page during before-cache", async () => {
+      await start(markup());
+      byId("close").click();
+      const kept = byId("notice-root");
+      const attributes = kept.outerHTML;
+
+      document.dispatchEvent(new Event("turbo:before-cache"));
+      await tick();
+
+      expect(kept.outerHTML).toBe(attributes);
+    });
+
+    it.each([false, true])("returns a dismissed implicit host, restored=%s", async (restored) => {
+      await start(`
+        <div id="notice" data-controller="stimeo--dismissible"
+             data-stimeo--dismissible-mode-value="hide" data-state="custom">
+          <button id="close" data-action="stimeo--dismissible#dismiss">Close</button>
+        </div>`);
+      byId("close").click();
+      if (restored) {
+        application = await restoreFromCache(application, (restoredApplication) =>
+          restoredApplication.register("stimeo--dismissible", DismissibleController),
+        );
+      }
+      const departed = byId("notice");
+      expect(departed.hidden).toBe(true);
+      expect(departed.getAttribute("data-state")).toBe("closing");
+
+      await depart(departed, "identifier");
+
+      expect(departed.hasAttribute("hidden")).toBe(false);
+      expect(departed.getAttribute("data-state")).toBe("custom");
+      expect(departed.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+    });
+
+    it("returns a dismissed implicit host when an explicit root arrives", async () => {
+      await start(`
+        <div id="notice" data-controller="stimeo--dismissible"
+             data-stimeo--dismissible-mode-value="hide">
+          <button id="close" data-action="stimeo--dismissible#dismiss">Close</button>
+        </div>`);
+      byId("close").click();
+      const successor = document.createElement("div");
+      successor.setAttribute("data-stimeo--dismissible-target", "root");
+
+      byId("notice").append(successor);
+      await tick();
+
+      expect(byId("notice").hasAttribute("hidden")).toBe(false);
+      expect(byId("notice").hasAttribute("data-state")).toBe(false);
+      expect(successor.getAttribute("data-state")).toBe("open");
+    });
+
+    it.each([
+      { restored: false, departure: "token" },
+      { restored: false, departure: "identifier" },
+      { restored: true, departure: "token" },
+      { restored: true, departure: "identifier" },
+    ] as const)(
+      "returns hidden and data-state after $departure departure, restored=$restored",
+      async ({ restored, departure }) => {
+        await start(markup());
+        byId("close").click();
+        expect(byId("notice-root").hidden).toBe(true);
+        expect(byId("notice-root").getAttribute("data-state")).toBe("closing");
+        if (restored) {
+          application = await restoreFromCache(application, (restoredApplication) =>
+            restoredApplication.register("stimeo--dismissible", DismissibleController),
+          );
+        }
+        const departed = byId("notice-root");
+        expect(departed.hidden).toBe(true);
+        expect(departed.getAttribute("data-state")).toBe("closing");
+        byId("outside").focus();
+        const dispatched: string[] = [];
+        const record = (event: Event) => dispatched.push(event.type);
+        const events = ["stimeo--dismissible:dismiss", "change", "reconcile"];
+        for (const event of events) document.addEventListener(event, record, true);
+        try {
+          await depart(departed, departure);
+        } finally {
+          for (const event of events) document.removeEventListener(event, record, true);
+        }
+        expect(departed.hasAttribute("hidden")).toBe(false);
+        expect(departed.hasAttribute("data-state")).toBe(false);
+        expect(departed.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+        expect(document.activeElement).toBe(byId("outside"));
+        expect(dispatched).toEqual([]);
+      },
+    );
   });
 
   it("has no machine-detectable a11y violations", async () => {

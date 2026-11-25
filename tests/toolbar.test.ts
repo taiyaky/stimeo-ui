@@ -4,16 +4,8 @@ import { ToolbarController } from "../src/controllers/toolbar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
-
-/**
- * Behavioral tests for {@link ToolbarController}: the APG Toolbar — single Tab
- * stop (roving tabindex), arrow/Home/End navigation honoring orientation and
- * wrap, focus restoration to the most recently active control, and the runtime
- * boundaries where the lone Tab stop must be re-established (controls added,
- * removed, disabled, or hidden after connect).
- */
 
 const LABELS = ["Bold", "Italic", "Underline"] as const;
 
@@ -55,11 +47,19 @@ const markup = ({
   </div>`;
 };
 
+/**
+ * Behavioral tests for {@link ToolbarController}: the APG Toolbar — single Tab
+ * stop (roving tabindex), arrow/Home/End navigation honoring orientation and
+ * wrap, focus restoration to the most recently active control, and the runtime
+ * boundaries where the lone Tab stop must be re-established (controls added,
+ * removed, disabled, or hidden after connect).
+ */
 describe("ToolbarController", () => {
   let application: Application;
 
   /** Mounts arbitrary toolbar markup and starts Stimulus over it. */
   const startMarkup = async (html: string) => {
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = html;
     application = Application.start();
     application.register("stimeo--toolbar", ToolbarController);
@@ -84,6 +84,142 @@ describe("ToolbarController", () => {
       root(index).querySelectorAll<HTMLElement>("[data-stimeo--toolbar-target='control']"),
     );
   const tabindexes = (index = 0) => controls(index).map((control) => control.tabIndex);
+
+  describe("borrowed tabindex", () => {
+    it.each(
+      (["live", "restored"] as const).flatMap((page) =>
+        [true, false].flatMap((authored) =>
+          (["token", "identifier"] as const).map((departure) => ({ page, authored, departure })),
+        ),
+      ),
+    )(
+      "returns authored tabindex on $page $departure departure (authored=$authored)",
+      async ({ page, authored, departure }) => {
+        await start({ tabindexes: authored ? ["-1", "0", "-1"] : [null, null, null] });
+        const initialTargets = controls();
+        const second = initialTargets[1];
+        if (!second) throw new Error("Expected a second target");
+        pressKey(second, "Home");
+        expect(second.getAttribute("tabindex")).toBe("-1");
+        if (page === "restored") {
+          application = await restoreFromCache(application, (restored) =>
+            restored.register("stimeo--toolbar", ToolbarController),
+          );
+        }
+        const widget = root();
+        const targets = controls();
+        const departing = targets[1];
+        if (!departing) throw new Error("Expected a departing target");
+        if (departure === "token") departing.removeAttribute("data-stimeo--toolbar-target");
+        else widget.removeAttribute("data-controller");
+        await tick();
+
+        expect(departing.getAttribute("tabindex")).toBe(authored ? "0" : null);
+        expect(departing.hasAttribute("data-stimeo--toolbar-tabindex-lease")).toBe(false);
+        if (departure === "identifier") {
+          expect(targets.map((target) => target.getAttribute("tabindex"))).toEqual(
+            authored ? ["-1", "0", "-1"] : [null, null, null],
+          );
+          expect(
+            targets.some((target) => target.hasAttribute("data-stimeo--toolbar-tabindex-lease")),
+          ).toBe(false);
+        }
+      },
+    );
+
+    it.each(["5", null])(
+      "preserves a page-written tabindex of %s when the identifier is removed",
+      async (value) => {
+        await start({ tabindexes: ["-1", "0", "-1"] });
+        const widget = root();
+        const targets = controls();
+        const second = targets[1];
+        if (!second) throw new Error("Expected a second target");
+        pressKey(second, "Home");
+        expect(second.getAttribute("tabindex")).toBe("-1");
+        if (value === null) second.removeAttribute("tabindex");
+        else second.setAttribute("tabindex", value);
+        widget.removeAttribute("data-controller");
+        await tick();
+
+        expect(second.getAttribute("tabindex")).toBe(value);
+        expect(second.hasAttribute("data-stimeo--toolbar-tabindex-lease")).toBe(false);
+      },
+    );
+
+    it("keeps current tabindex through root detach and reconnect", async () => {
+      await start();
+      const widget = root();
+      const targets = controls();
+      const second = targets[1];
+      if (!second) throw new Error("Expected a second target");
+      pressKey(second, "End");
+      const before = targets.map((target) => target.outerHTML);
+      widget.remove();
+      await tick();
+      expect(targets.map((target) => target.outerHTML)).toEqual(before);
+      document.body.append(widget);
+      await tick();
+      expect(targets.map((target) => target.getAttribute("tabindex"))).toEqual(["-1", "-1", "0"]);
+    });
+
+    it("keeps the active target without tabindex writes during a move inside its scope", async () => {
+      await start();
+      const widget = root();
+      const targets = controls();
+      const first = targets[0];
+      const second = targets[1];
+      if (!first || !second) throw new Error("Expected two targets");
+      pressKey(first, "ArrowRight");
+      expect(second.getAttribute("tabindex")).toBe("0");
+      const records: MutationRecord[] = [];
+      const observer = new MutationObserver((batch) => records.push(...batch));
+      observer.observe(widget, { attributes: true, subtree: true, attributeFilter: ["tabindex"] });
+      try {
+        widget.insertBefore(second, second.nextSibling);
+        await tick();
+        records.push(...observer.takeRecords());
+      } finally {
+        observer.disconnect();
+      }
+      expect(targets.map((target) => target.getAttribute("tabindex"))).toEqual(["-1", "0", "-1"]);
+      expect(records).toEqual([]);
+    });
+
+    it.each(["0", "7", null])(
+      "returns a runtime target's authored tabindex of %s",
+      async (original) => {
+        await start();
+        const widget = root();
+        const existing = controls()[0];
+        if (!existing) throw new Error("Expected an existing target");
+        const inserted = document.createElement("button");
+        inserted.setAttribute("data-stimeo--toolbar-target", "control");
+        if (original !== null) inserted.setAttribute("tabindex", original);
+        widget.prepend(inserted);
+        await tick();
+        expect(inserted.getAttribute("tabindex")).toBe("-1");
+        inserted.removeAttribute("data-stimeo--toolbar-target");
+        await tick();
+        expect(inserted.getAttribute("tabindex")).toBe(original);
+        inserted.setAttribute("data-stimeo--toolbar-target", "control");
+        await tick();
+        expect(inserted.getAttribute("tabindex")).toBe("-1");
+        expect(existing.getAttribute("tabindex")).toBe("0");
+      },
+    );
+
+    it("returns tabindex when the controller element is its own target", async () => {
+      const html = `<div id="group" data-controller="stimeo--toolbar" data-stimeo--toolbar-target="control"
+        role="toolbar" aria-label="Actions" tabindex="-1">Action</div>`;
+      await startMarkup(html);
+      const widget = root();
+      expect(widget.getAttribute("tabindex")).toBe("0");
+      widget.removeAttribute("data-controller");
+      await tick();
+      expect(widget.getAttribute("tabindex")).toBe("-1");
+    });
+  });
 
   it.each(
     (["Home", "End"] as const).flatMap((key) =>
@@ -168,7 +304,7 @@ describe("ToolbarController", () => {
     const first = controls()[0];
     if (!first) throw new Error("Expected first control");
     first.tabIndex = -1;
-    instance.controlTargetDisconnected();
+    instance.controlTargetDisconnected(first);
     expect(tabindexes()).toEqual([-1, -1, -1]);
     instance.connect();
     expect(tabindexes()).toEqual([0, -1, -1]);
@@ -249,7 +385,7 @@ describe("ToolbarController", () => {
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
 
-  it("establishes the tab stop itself when no control declares tabindex", async () => {
+  it("uses the first effective tab stop when only the last control declares tabindex=0", async () => {
     // Natively focusable elements are effectively tabindex=0 when the attribute
     // is absent, so an author who annotates only the intended entry point (here
     // the last control) silently gets the first one instead — the markup
@@ -321,7 +457,7 @@ describe("ToolbarController", () => {
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
-  it("yields to a key a descendant widget already consumed", async () => {
+  it("leaves focus and the tab stop in place when capture already canceled the key", async () => {
     await start();
     root().addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
     pressKey(controls()[0] as HTMLElement, "ArrowRight");

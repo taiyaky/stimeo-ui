@@ -9,12 +9,6 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link TagsInputController}: commit on Enter/delimiter,
- * empty/duplicate/max rejection, Backspace deletion, chip roving navigation,
- * hidden-field mirroring, focus hand-off, and the `change`/`reject` events.
- */
-
 const tagTemplate = `
     <template data-stimeo--tags-input-target="tagTemplate">
       <li role="listitem" data-stimeo--tags-input-target="tag">
@@ -24,9 +18,9 @@ const tagTemplate = `
       </li>
     </template>`;
 
-const markup = (attrs = "", template = tagTemplate) => `
+const markup = (attrs = "", template = tagTemplate, initialTags = "") => `
   <div data-controller="stimeo--tags-input" ${attrs}>
-    <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+    <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags">${initialTags}</ul>
     <input type="text" aria-label="Add tag" aria-describedby="tags-help"
            data-stimeo--tags-input-target="input"
            data-action="keydown->stimeo--tags-input#onKeydown" />
@@ -35,6 +29,11 @@ const markup = (attrs = "", template = tagTemplate) => `
 ${template}
   </div>`;
 
+/**
+ * Behavioral tests for {@link TagsInputController}: commit on Enter/delimiter,
+ * empty/duplicate/max rejection, Backspace deletion, chip roving navigation,
+ * hidden-field mirroring, focus hand-off, and the `change`/`reject` events.
+ */
 describe("TagsInputController", () => {
   let application: Application;
   let announcements: Array<{ message: string; assertive: boolean }>;
@@ -475,7 +474,7 @@ describe("TagsInputController", () => {
     expect(row.childNodes).toHaveLength(0);
   });
 
-  it("commits a tag on the configured delimiter", async () => {
+  it("commits a tag on the default comma delimiter", async () => {
     await mount();
     type("Vue", ",");
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["Vue"]);
@@ -497,8 +496,7 @@ describe("TagsInputController", () => {
   it("does not commit on the Enter that confirms an IME composition", async () => {
     await mount();
     input().value = "ぎじゅつ";
-    // The Enter that confirms an IME candidate carries isComposing=true; it must
-    // only confirm the IME, never commit the tag.
+    // Enter with isComposing=true leaves the candidate in the input.
     keyboardPress(input(), "Enter", { isComposing: true });
     expect(tags()).toHaveLength(0);
     expect(input().value).toBe("ぎじゅつ");
@@ -908,7 +906,7 @@ describe("TagsInputController", () => {
   });
 
   it.each(["chip", "input", "neighbor"])(
-    "lets input focus settle only when removal moves focus from the last chip (%s)",
+    "requests an after-focus announcement only when removing the focused last chip transfers focus to the input (%s)",
     async (origin) => {
       await mount(
         'data-stimeo--tags-input-announce-removed-text-value="Removed {value}; {count} total"',
@@ -1205,8 +1203,35 @@ describe("TagsInputController", () => {
     });
 
     it("seeds the authored tags without reporting a commit", async () => {
-      await mount();
+      document.body.innerHTML = markup(
+        'data-stimeo--tags-input-name-value="tags[]"',
+        tagTemplate,
+        `<li role="listitem" data-stimeo--tags-input-target="tag" data-value="Rails">
+          <span data-stimeo--tags-input-target="label">Rails</span>
+          <button type="button" data-stimeo--tags-input-target="remove"
+                  aria-label="Remove Rails">×</button>
+        </li>
+        <li role="listitem" data-stimeo--tags-input-target="tag" data-value="Hotwire">
+          <span data-stimeo--tags-input-target="label">Hotwire</span>
+          <button type="button" data-stimeo--tags-input-target="remove"
+                  aria-label="Remove Hotwire">×</button>
+        </li>`,
+      );
+      const changes: Event[] = [];
+      const reconciles: Event[] = [];
+      root().addEventListener("stimeo--tags-input:change", (event) => changes.push(event));
+      root().addEventListener("stimeo--tags-input:reconcile", (event) => reconciles.push(event));
+      expect(fields()).toEqual([]);
+      application = Application.start();
+      application.register("stimeo--tags-input", TagsInputController);
+      await tick();
 
+      expect(fields().map((input) => [input.type, input.name, input.value])).toEqual([
+        ["hidden", "tags[]", "Rails"],
+        ["hidden", "tags[]", "Hotwire"],
+      ]);
+      expect(changes).toEqual([]);
+      expect(reconciles).toEqual([]);
       expect(commits.seen).toEqual([]);
     });
 
@@ -1374,7 +1399,7 @@ ${selfRemove}
       expect(fields()).toHaveLength(0);
     });
 
-    it("replaces the label rather than appending to it", async () => {
+    it("writes a distinct label for each newly created tag", async () => {
       await mountNested();
 
       type("Rails", "Enter");

@@ -10,6 +10,7 @@ import {
   hasTabStop,
   inheritsFieldsetDisabled,
   isTabStop,
+  isUncheckedRadioInCheckedGroup,
   sequentialTabStops,
   tabStopsWithin,
 } from "../../src/utils/focus_candidate";
@@ -488,6 +489,85 @@ describe("sequentialTabStops", () => {
     expect(ids(sequentialTabStops(el("root"), el("out")))).toEqual(["in-1"]);
   });
 
+  it.each([
+    ["plain", "", ""],
+    ["disabled ends", "disabled", "disabled"],
+    ["negative ends", 'tabindex="-1"', 'tabindex="-1"'],
+    ["unavailable checked end", "checked disabled", "disabled"],
+  ])("enters an unchecked group by direction with %s", (_name, first, last) => {
+    const r = root(
+      `<button id="a">A</button>${radio("g", "g1", first)}${radio("g", "g2")}` +
+        `${radio("g", "g3")}${radio("g", "g4", last)}<button id="b">B</button>`,
+    );
+    const head = first === "" ? "g1" : "g2";
+    const tail = last === "" ? "g4" : "g3";
+
+    expect(ids(sequentialTabStops(r, el("a")))).toEqual([head, "b"]);
+    expect(ids(sequentialTabStops(r, el("b"), true))).toEqual([tail, "a"]);
+    expect(ids(sequentialTabStops(r, null, true))).toEqual(["b", tail, "a"]);
+  });
+
+  it.each([false, true])(
+    "leaves a focused unchecked group without re-entering it, backward=%s",
+    (backward) => {
+      const r = root(
+        `<button id="a">A</button>${radio("g", "g1")}${radio("g", "g2")}` +
+          `${radio("g", "g3")}<button id="b">B</button>`,
+      );
+
+      expect(ids(sequentialTabStops(r, el("g2"), backward))).toEqual(
+        backward ? ["a", "b"] : ["b", "a"],
+      );
+      el("g2").focus();
+      el(backward ? "b" : "a").focus();
+      expect(ids(sequentialTabStops(r, el(backward ? "b" : "a"), backward))[0]).toBe(
+        backward ? "g3" : "g1",
+      );
+    },
+  );
+
+  it("bounds reverse entry by the root despite a checked radio outside it", () => {
+    document.body.innerHTML = `${radio("g", "out", "checked")}<div id="root">${radio("g", "in-1")}${radio("g", "in-2")}</div>`;
+
+    expect(ids(sequentialTabStops(el("root"), null, true))).toEqual(["in-2"]);
+    expect(ids(sequentialTabStops(el("root"), el("out"), true))).toEqual(["in-2"]);
+  });
+
+  it("keeps reverse entry separate by name and form owner, including nameless radios", () => {
+    const r = root(
+      `${radio("g", "g1")}${radio("g", "g2")}` +
+        `${radio("h", "h1")}${radio("h", "h2")}` +
+        `${radio("g", "f1", 'form="form"')}${radio("g", "f2", 'form="form"')}` +
+        `${radio("", "bare1")}${radio("", "bare2")}<form id="form"></form>`,
+    );
+
+    expect(ids(sequentialTabStops(r, null, true))).toEqual(["bare2", "bare1", "f2", "h2", "g2"]);
+  });
+
+  it("keeps radios in different trees separate while reversing through an open shadow root", () => {
+    const r = root(`${radio("g", "light1")}${radio("g", "light2")}<div id="host"></div>`);
+    const shadow = el("host").attachShadow({ mode: "open" });
+    shadow.innerHTML = `${radio("g", "shadow1")}${radio("g", "shadow2")}`;
+
+    expect(ids(sequentialTabStops(r, null, true))).toEqual(["shadow2", "light2"]);
+  });
+
+  it("enters radios around a range by direction without retaining a former focused member", () => {
+    const r = root(
+      `<p id="before">Before</p>${radio("g", "g1")}${radio("g", "g2")}` +
+        `${radio("g", "g3")}<p id="after">After</p>`,
+    );
+    const before = document.createRange();
+    before.selectNodeContents(el("before"));
+    before.collapse(false);
+    const after = document.createRange();
+    after.selectNodeContents(el("after"));
+    after.collapse(true);
+
+    expect(ids(sequentialTabStops(r, before))[0]).toBe("g1");
+    expect(ids(sequentialTabStops(r, after, true))[0]).toBe("g3");
+  });
+
   it("leaves out links in editable content that have no tabindex", () => {
     const r = root(
       '<div id="host" contenteditable><a id="link" href="#x">x</a>' +
@@ -611,6 +691,302 @@ describe("sequentialTabStops", () => {
     expect(ids(sequentialTabStops(r, shadow.getElementById("two")))).toEqual([]);
     expect(ids(sequentialTabStops(r, shadow.getElementById("two"), true))).toEqual(["one"]);
     expect(ids(sequentialTabStops(r, shadow.getElementById("one"), true))).toEqual([]);
+  });
+
+  for (const tabindex of [-1, 0]) {
+    it(`moves from the non-stops at both ends of a shadow root under a host with tabindex=${tabindex}`, () => {
+      const r = root(
+        `<button id="before">Before</button><div id="host" tabindex="${tabindex}"></div>` +
+          '<button id="after">After</button>',
+      );
+      const shadow = el("host").attachShadow({ mode: "open" });
+      shadow.innerHTML =
+        '<h2 tabindex="-1" id="start">Start</h2><button id="one">One</button>' +
+        '<button id="two">Two</button><h2 tabindex="-1" id="end">End</h2>';
+      const start = shadow.getElementById("start");
+      const end = shadow.getElementById("end");
+
+      expect(ids(sequentialTabStops(r, end))).toEqual(
+        tabindex < 0 ? ["after", "before"] : ["after", "before", "host", "one", "two"],
+      );
+      expect(ids(sequentialTabStops(r, end, true))).toEqual(
+        tabindex < 0
+          ? ["two", "one", "before", "after"]
+          : ["two", "one", "host", "before", "after"],
+      );
+      expect(ids(sequentialTabStops(r, start))).toEqual(
+        tabindex < 0
+          ? ["one", "two", "after", "before"]
+          : ["one", "two", "after", "before", "host"],
+      );
+      expect(ids(sequentialTabStops(r, start, true))).toEqual(
+        tabindex < 0 ? ["before", "after"] : ["host", "before", "after", "two", "one"],
+      );
+    });
+  }
+
+  describe("from a position", () => {
+    const at = (node: Node, offset: number): Range => {
+      const range = document.createRange();
+      range.setStart(node, offset);
+      range.collapse(true);
+      return range;
+    };
+    const around = (node: Node): Range => {
+      const range = document.createRange();
+      range.selectNode(node);
+      return range;
+    };
+
+    it("moves to the nearest stops around a position in text, whatever the tabindex", () => {
+      const r = root(
+        '<button id="a">A</button><p id="p">lead <a href="#" id="l1">one</a> middle ' +
+          '<a href="#" id="l2">two</a></p><button id="b" tabindex="1">B</button>',
+      );
+      const middle = el("p").childNodes[2] as Text;
+
+      expect(ids(sequentialTabStops(r, at(middle, 3)))).toEqual(["l2", "b", "a", "l1"]);
+      expect(ids(sequentialTabStops(r, at(middle, 3), true))).toEqual(["l1", "a", "b", "l2"]);
+    });
+
+    it("moves past the element a range around it marks, both ways", () => {
+      const r = root('<button id="a">A</button><button id="b">B</button><button id="c">C</button>');
+
+      expect(ids(sequentialTabStops(r, around(el("b"))))).toEqual(["c", "a", "b"]);
+      expect(ids(sequentialTabStops(r, around(el("b")), true))).toEqual(["a", "c", "b"]);
+    });
+
+    it("counts the stop that holds a position as neither before nor after it", () => {
+      const r = root(
+        '<button id="a">A</button><button id="b"><span id="label">Label</span></button>' +
+          '<button id="c">C</button>',
+      );
+      const inside = at(el("label").firstChild as Text, 2);
+
+      expect(ids(sequentialTabStops(r, inside))).toEqual(["c", "a", "b"]);
+      expect(ids(sequentialTabStops(r, inside, true))).toEqual(["a", "c", "b"]);
+      expect(ids(sequentialTabStops(r, at(el("b"), 1), true))).toEqual(["a", "c", "b"]);
+    });
+
+    it("moves from a position in an open shadow root in flat-tree order, slots expanded", () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host"><button id="light">Light</button></div>' +
+          '<button id="after">After</button>',
+      );
+      const shadow = el("host").attachShadow({ mode: "open" });
+      shadow.innerHTML =
+        '<button id="s1">S1</button><slot></slot><p id="text">Text</p><button id="s2">S2</button>';
+      const text = (shadow.getElementById("text") as HTMLElement).firstChild as Text;
+
+      expect(ids(sequentialTabStops(r, at(text, 1)))[0]).toBe("s2");
+      expect(ids(sequentialTabStops(r, at(text, 1), true))[0]).toBe("light");
+    });
+
+    it("finishes an excluded scope from a position in it, then leaves without re-entering", () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host" tabindex="-1"></div>' +
+          '<button id="after">After</button>',
+      );
+      const shadow = el("host").attachShadow({ mode: "open" });
+      shadow.innerHTML = '<button id="one">One</button><p id="end">End</p>';
+      const end = (shadow.getElementById("end") as HTMLElement).firstChild as Text;
+
+      expect(ids(sequentialTabStops(r, at(end, 1)))).toEqual(["after", "before"]);
+      expect(ids(sequentialTabStops(r, at(end, 1), true))).toEqual(["one", "before", "after"]);
+    });
+
+    it("moves forward from the range's end and backward from its start", () => {
+      const r = root(
+        '<button id="a">A</button><p id="p1">One</p><button id="b">B</button>' +
+          '<p id="p2">Two</p><button id="c">C</button>',
+      );
+      const range = document.createRange();
+      range.setStart(el("p1").firstChild as Text, 1);
+      range.setEnd(el("p2").firstChild as Text, 1);
+
+      expect(ids(sequentialTabStops(r, range))[0]).toBe("c");
+      expect(ids(sequentialTabStops(r, range, true))[0]).toBe("a");
+    });
+
+    it("walks slotted content in the order its slot assigns it", () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host"><p id="lp">Light</p>' +
+          '<button id="lb">Light button</button></div><button id="after">After</button>',
+      );
+      el("host").attachShadow({ mode: "open" }).innerHTML =
+        '<slot></slot><button id="s2">S2</button>';
+      const light = el("lp").firstChild as Text;
+
+      expect(ids(sequentialTabStops(r, at(light, 1)))[0]).toBe("lb");
+      expect(ids(sequentialTabStops(r, at(light, 1), true))[0]).toBe("before");
+    });
+
+    it("walks a slot's own content when nothing is assigned to it", () => {
+      const r = root('<div id="host"></div><button id="after">After</button>');
+      const shadow = el("host").attachShadow({ mode: "open" });
+      shadow.innerHTML =
+        '<slot><span id="fallback">Fallback</span><button id="fb">FB</button></slot>';
+      const fallback = (shadow.getElementById("fallback") as HTMLElement).firstChild as Text;
+
+      expect(ids(sequentialTabStops(r, at(fallback, 1)))[0]).toBe("fb");
+    });
+
+    it("goes on after the host from light content no slot shows", () => {
+      const r = root(
+        '<div id="host"><p id="unshown">Unshown</p></div><button id="after">After</button>',
+      );
+      el("host").attachShadow({ mode: "open" }).innerHTML =
+        '<button id="s1">S1</button><button id="s2">S2</button>';
+
+      expect(ids(sequentialTabStops(r, at(el("unshown").firstChild as Text, 1)))[0]).toBe("after");
+    });
+
+    it("moves from the end of an element to the stops around it", () => {
+      const r = root(
+        '<button id="a">A</button><p id="p">Text <a href="#" id="l1">one</a></p>' +
+          '<button id="b">B</button>',
+      );
+      const end = at(el("p"), el("p").childNodes.length);
+
+      expect(ids(sequentialTabStops(r, end))[0]).toBe("b");
+      expect(ids(sequentialTabStops(r, end, true))[0]).toBe("l1");
+    });
+
+    it("moves from the end of an open shadow root past its host", () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host"></div><div id="plain"></div>' +
+          '<button id="after">After</button>',
+      );
+      const shadow = el("host").attachShadow({ mode: "open" });
+      shadow.innerHTML = '<button id="s1">S1</button>Text';
+      const plain = el("plain").attachShadow({ mode: "open" });
+      plain.innerHTML = "Text only";
+
+      expect(ids(sequentialTabStops(r, at(shadow, shadow.childNodes.length)))[0]).toBe("after");
+      expect(ids(sequentialTabStops(r, at(shadow, shadow.childNodes.length), true))[0]).toBe("s1");
+      expect(ids(sequentialTabStops(r, at(plain, plain.childNodes.length), true))[0]).toBe("s1");
+    });
+
+    it("moves around a position in the open shadow root of a host that is a stop", () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host" tabindex="0"></div>' +
+          '<button id="after">After</button>',
+      );
+      const shadow = el("host").attachShadow({ mode: "open" });
+      shadow.innerHTML = '<button id="s1">S1</button>Bare text<button id="s2">S2</button>';
+      const bare = shadow.childNodes[1] as Text;
+
+      expect(ids(sequentialTabStops(r, at(bare, 2)))[0]).toBe("s2");
+      expect(ids(sequentialTabStops(r, at(bare, 2), true))[0]).toBe("s1");
+      expect(ids(sequentialTabStops(r, at(shadow, 1)))[0]).toBe("s2");
+    });
+
+    it("moves around a position inside a region that is a stop to the region's own stops", () => {
+      const r = root(
+        '<button id="a">A</button><div id="region" tabindex="0"><button id="r1">R1</button>' +
+          '<button id="r2">R2</button><button id="r3">R3</button></div><button id="c">C</button>',
+      );
+
+      expect(ids(sequentialTabStops(r, around(el("r2"))))[0]).toBe("r3");
+      expect(ids(sequentialTabStops(r, around(el("r2")), true))[0]).toBe("r1");
+      expect(ids(sequentialTabStops(r, at(el("region"), 1)))[0]).toBe("r2");
+      expect(ids(sequentialTabStops(r, at(el("region"), 1), true))[0]).toBe("r1");
+      expect(ids(sequentialTabStops(r, around(el("r1")), true))[0]).toBe("a");
+    });
+
+    it("reads a position among a host's own children where their slot puts them", () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host"><button id="l1">L1</button></div>' +
+          '<div id="bare"></div><button id="after">After</button>',
+      );
+      el("host").attachShadow({ mode: "open" }).innerHTML =
+        '<slot></slot><button id="s2">S2</button>';
+      el("bare").attachShadow({ mode: "open" }).innerHTML =
+        '<button id="b1">B1</button><button id="b2">B2</button>';
+
+      expect(ids(sequentialTabStops(r, around(el("l1"))))[0]).toBe("s2");
+      expect(ids(sequentialTabStops(r, around(el("l1")), true))[0]).toBe("before");
+      expect(ids(sequentialTabStops(r, at(el("host"), 1)))[0]).toBe("s2");
+      expect(ids(sequentialTabStops(r, at(el("host"), 1), true))[0]).toBe("l1");
+      expect(ids(sequentialTabStops(r, at(el("bare"), 0)))[0]).toBe("b1");
+      expect(ids(sequentialTabStops(r, at(el("bare"), 0), true))[0]).toBe("s2");
+    });
+
+    it("moves from the edges of an empty open shadow root to the stops around its host", () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host"></div><button id="after">After</button>',
+      );
+      const shadow = el("host").attachShadow({ mode: "open" });
+
+      expect(ids(sequentialTabStops(r, at(shadow, 0)))[0]).toBe("after");
+      expect(ids(sequentialTabStops(r, at(shadow, 0), true))[0]).toBe("before");
+    });
+
+    it("goes back from before a host's first slotted child to the shadow stops before its slot", () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host"><button id="l1">L1</button></div>' +
+          '<button id="after">After</button>',
+      );
+      el("host").attachShadow({ mode: "open" }).innerHTML =
+        '<button id="s1">S1</button><slot></slot>';
+
+      expect(ids(sequentialTabStops(r, at(el("host"), 0), true))[0]).toBe("s1");
+    });
+
+    it("leaves out a host that is a stop when only content that is not a stop precedes the position", () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host" tabindex="0"></div>' +
+          '<button id="after">After</button>',
+      );
+      const shadow = el("host").attachShadow({ mode: "open" });
+      shadow.innerHTML = '<span id="note">Note</span><button id="s2">S2</button>';
+
+      expect(ids(sequentialTabStops(r, at(shadow, 1), true))[0]).toBe("before");
+    });
+
+    it("leaves out the button that holds text after an element inside it", () => {
+      const r = root(
+        '<button id="a">A</button><button id="b"><span id="icon">*</span> tail</button>' +
+          '<button id="c">C</button>',
+      );
+      const tail = el("b").childNodes[1] as Text;
+
+      expect(ids(sequentialTabStops(r, at(tail, 2), true))[0]).toBe("a");
+    });
+
+    it("leaves out a stop in the shadow tree that holds a slotted position", () => {
+      const r = root(
+        '<button id="a">A</button><div id="host"><span id="lead">Lead</span></div>' +
+          '<button id="c">C</button>',
+      );
+      el("host").attachShadow({ mode: "open" }).innerHTML =
+        '<div id="wrap" tabindex="0"><slot></slot></div>';
+
+      expect(ids(sequentialTabStops(r, at(el("host"), 1), true))[0]).toBe("a");
+      expect(ids(sequentialTabStops(r, at(el("lead").firstChild as Text, 2), true))[0]).toBe("a");
+      expect(ids(sequentialTabStops(r, at(el("host"), 1)))[0]).toBe("c");
+    });
+
+    it("enters at the first or last stop from a position outside the root", () => {
+      const r = root('<button id="a">A</button><button id="b">B</button>');
+      const trailer = document.createElement("p");
+      document.body.append(trailer);
+      expect(ids(sequentialTabStops(r, at(trailer, 0)))).toEqual(["a", "b"]);
+
+      expect(
+        ids(sequentialTabStops(r, at(document.body, document.body.childNodes.length))),
+      ).toEqual(["a", "b"]);
+      expect(ids(sequentialTabStops(r, at(document.documentElement, 0), true))).toEqual(["b", "a"]);
+    });
+
+    it("enters at the first or last stop from a position at an end of the root", () => {
+      const r = root('<button id="a">A</button><button id="b">B</button>');
+
+      expect(ids(sequentialTabStops(r, at(r, 0)))).toEqual(["a", "b"]);
+      expect(ids(sequentialTabStops(r, at(r, 0), true))).toEqual(["b", "a"]);
+      expect(ids(sequentialTabStops(r, at(r, 2)))).toEqual(["a", "b"]);
+      expect(ids(sequentialTabStops(r, at(r, 2), true))).toEqual(["b", "a"]);
+    });
   });
 
   it("leaves an excluded scope backward from a non-stop before its first stop", () => {
@@ -805,6 +1181,79 @@ describe("sequentialTabStops", () => {
 
       expect(ids(sequentialTabStops(r))).toEqual(["after"]);
     });
+  });
+});
+
+describe("isUncheckedRadioInCheckedGroup", () => {
+  const el = (id: string): HTMLElement => document.getElementById(id) as HTMLElement;
+  const radio = (name: string, id: string, extra = "") =>
+    `<input type="radio" name="${name}" id="${id}" ${extra}>`;
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("answers yes for an unchecked radio whose group has a checked radio before or after it", () => {
+    document.body.innerHTML =
+      `${radio("g", "g1", "checked")}${radio("g", "g2")}` +
+      `${radio("h", "h1")}<div>${radio("h", "h2", "checked")}</div>`;
+
+    expect(isUncheckedRadioInCheckedGroup(el("g2"))).toBe(true);
+    expect(isUncheckedRadioInCheckedGroup(el("h1"))).toBe(true);
+  });
+
+  it("answers no for the checked radio itself and for a group with nothing checked", () => {
+    document.body.innerHTML = `${radio("g", "g1", "checked")}${radio("u", "u1")}${radio("u", "u2")}`;
+
+    expect(isUncheckedRadioInCheckedGroup(el("g1"))).toBe(false);
+    expect(isUncheckedRadioInCheckedGroup(el("u1"))).toBe(false);
+    expect(isUncheckedRadioInCheckedGroup(el("u2"))).toBe(false);
+  });
+
+  it.each([
+    ["disabled", "disabled"],
+    ["hidden", "hidden"],
+    ["inert", "inert"],
+    ["taken out of the order", 'tabindex="-1"'],
+  ])("does not count a checked radio that is %s", (_name, extra) => {
+    document.body.innerHTML = `${radio("g", "g1", `checked ${extra}`)}${radio("g", "g2")}`;
+
+    expect(isUncheckedRadioInCheckedGroup(el("g2"))).toBe(false);
+  });
+
+  it("answers no for anything that is not a radio, even when it shares a checked radio's name", () => {
+    document.body.innerHTML =
+      `${radio("g", "g1", "checked")}<button id="button" name="g">B</button>` +
+      '<input type="checkbox" name="g" id="box"><input name="g" id="text">';
+
+    expect(isUncheckedRadioInCheckedGroup(el("button"))).toBe(false);
+    expect(isUncheckedRadioInCheckedGroup(el("box"))).toBe(false);
+    expect(isUncheckedRadioInCheckedGroup(el("text"))).toBe(false);
+  });
+
+  it("does not count a checked checkbox of the same name as the group's checked radio", () => {
+    document.body.innerHTML = `<input type="checkbox" name="g" id="box" checked>${radio("g", "g1")}`;
+
+    expect(isUncheckedRadioInCheckedGroup(el("g1"))).toBe(false);
+  });
+
+  it("reads the group by name, form owner and tree", () => {
+    document.body.innerHTML =
+      `${radio("other", "o1", "checked")}${radio("g", "g1")}` +
+      `<input type="radio" id="nameless1" checked><input type="radio" id="nameless2">` +
+      `<form id="f">${radio("g", "f1", "checked")}</form>` +
+      `<input type="radio" name="g" id="owned" form="f">` +
+      `<form>${radio("g", "f2")}</form><div id="host"></div>`;
+    const shadow = el("host").attachShadow({ mode: "open" });
+    shadow.innerHTML = radio("g", "inner1", "checked") + radio("g", "inner2");
+
+    expect(isUncheckedRadioInCheckedGroup(el("g1"))).toBe(false);
+    expect(isUncheckedRadioInCheckedGroup(el("nameless2"))).toBe(false);
+    expect(isUncheckedRadioInCheckedGroup(el("owned"))).toBe(true);
+    expect(isUncheckedRadioInCheckedGroup(el("f2"))).toBe(false);
+    expect(isUncheckedRadioInCheckedGroup(shadow.getElementById("inner2") as HTMLElement)).toBe(
+      true,
+    );
   });
 });
 

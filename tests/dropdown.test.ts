@@ -223,6 +223,20 @@ describe("DropdownController", () => {
     expect(document.activeElement).toBe(trigger());
   });
 
+  it("keeps the opened menu when writing expanded synchronously retires the trigger", () => {
+    const opening = trigger();
+    const setAttribute = opening.setAttribute.bind(opening);
+    opening.setAttribute = (name, value) => {
+      setAttribute(name, value);
+      if (name === "aria-expanded" && value === "true") opening.remove();
+    };
+
+    expect(() => controller().toggle()).not.toThrow();
+
+    expect(opening.isConnected).toBe(false);
+    expect(menu().hidden).toBe(false);
+  });
+
   it("handles missing targets without throwing", async () => {
     document.body.insertAdjacentHTML(
       "beforeend",
@@ -369,7 +383,7 @@ describe("DropdownController", () => {
       expect(menu().hidden).toBe(true);
     });
 
-    it("keeps a menu that arrived after the open one left closed", async () => {
+    it("preserves the transferred open state through a morph", async () => {
       trigger().click();
       const old = menu();
       old.remove();
@@ -378,14 +392,14 @@ describe("DropdownController", () => {
       arrived.setAttribute("data-stimeo--dropdown-target", "menu");
       root().append(arrived);
       controller().menuTargetConnected();
-      expect(arrived.hidden).toBe(true);
+      expect(arrived.hidden).toBe(false);
 
       morph();
       await flushMicrotasks();
 
       expect(menu()).toBe(arrived);
-      expect(arrived.hidden).toBe(true);
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(arrived.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
     });
 
     it("repairs nothing when no menu is left", async () => {
@@ -440,6 +454,17 @@ describe("DropdownController", () => {
 
       expect(trigger()).toBe(successor);
       expect(successor.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("reflects a page-closed menu into a replacement trigger", async () => {
+      controller().open();
+      menu().hidden = true;
+      const successor = staleTrigger();
+      trigger().replaceWith(successor);
+      await tick();
+
+      expect(successor.getAttribute("aria-expanded")).toBe("false");
+      expect(successor.getAttribute("aria-controls")).toBe(menu().id);
     });
 
     it("reflects the open menu into the trigger that stays after an earlier one leaves", async () => {
@@ -506,18 +531,25 @@ describe("DropdownController", () => {
       expect(trigger().getAttribute("aria-controls")).toBe(successor.id);
     });
 
-    it("releases the Escape layer and reads closed once the only menu leaves", async () => {
+    it("keeps Escape dismissal and returns focus after the only menu leaves", async () => {
       trigger().click();
-      menu().remove();
+      const original = menu();
+      const successor = staleMenu(false);
+      original.remove();
       await tick();
 
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(trigger().hasAttribute("aria-controls")).toBe(false);
+      const events = captureStateEvents("stimeo--dropdown", undefined, root());
+      typeKey(document.body, "Escape");
+      expect(document.activeElement).toBe(trigger());
+      root().append(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(true);
       expect(trigger().getAttribute("aria-expanded")).toBe("false");
-      const outside = byId("outside");
-      outside.focus();
-      trigger().focus();
-      const press = keyEvent("Escape");
-      keyboardPress(document.activeElement as HTMLElement, press);
-      expect(press.defaultPrevented).toBe(false);
+      expect(events.names()).toEqual(["close"]);
+      events.stop();
     });
 
     it("brings a trigger that arrives after the only one left to the open state", async () => {
@@ -533,18 +565,67 @@ describe("DropdownController", () => {
       expect(late.getAttribute("aria-controls")).toBe(menu().id);
     });
 
-    it("closes a menu that arrives after the only one left, even one authored open", async () => {
+    it("keeps a menu open when it arrives after the only one left", async () => {
       controller().open();
-      const late = staleMenu(false);
+      const late = staleMenu(true);
       menu().remove();
       await tick();
 
       root().append(late);
       await tick();
 
-      expect(late.hidden).toBe(true);
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(late.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
       expect(trigger().getAttribute("aria-controls")).toBe(late.id);
+    });
+
+    it.each(["close", "toggle", "open", "Escape"] as const)(
+      "handles %s consistently with and without a menu during replacement",
+      async (action) => {
+        const instance = controller();
+        const closes = action !== "open";
+        const run = () => {
+          if (action === "Escape") typeKey(document.body, "Escape");
+          else instance[action]();
+        };
+        const events = captureStateEvents("stimeo--dropdown", undefined, root());
+        for (const timing of ["settled", "same task", "no target"]) {
+          instance.open();
+          events.clear();
+          trigger().blur();
+          const previous = menu();
+          const next = staleMenu(!closes);
+          if (timing === "no target") previous.remove();
+          else previous.replaceWith(next);
+          if (timing !== "same task") await tick();
+          run();
+          if (timing !== "no target") expect(next.hidden, timing).toBe(closes);
+          if (timing === "no target") root().append(next);
+          await tick();
+
+          expect(next.hidden, timing).toBe(closes);
+          expect(trigger().getAttribute("aria-expanded"), timing).toBe(String(!closes));
+          expect(trigger().getAttribute("aria-controls"), timing).toBe(next.id);
+          expect(events.names(), timing).toEqual(closes ? ["close"] : []);
+          if (action === "Escape") expect(document.activeElement, timing).toBe(trigger());
+        }
+        events.stop();
+      },
+    );
+
+    it("opens from closed while a replacement menu is missing", async () => {
+      const next = staleMenu(true);
+      menu().remove();
+      await tick();
+      const events = captureStateEvents("stimeo--dropdown", undefined, root());
+      controller().open();
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      root().append(next);
+      await tick();
+
+      expect(next.hidden).toBe(false);
+      expect(events.names()).toEqual(["open"]);
+      events.stop();
     });
 
     it("keeps the menu open when the trigger and the menu are replaced together", async () => {
@@ -745,6 +826,10 @@ describe("DropdownController", () => {
       await tick();
 
       expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      trigger().focus();
+      const escapeEvent = keyEvent("Escape");
+      keyboardPress(trigger(), escapeEvent);
+      expect(escapeEvent.defaultPrevented).toBe(false);
     });
 
     it("leaves a hidden value the page wrote on the menu alone when another menu arrives behind it", async () => {

@@ -1,6 +1,7 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CalendarController } from "../src/controllers/calendar_controller";
+import { announcesAfterFocus } from "../src/utils/announce";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
 import { keyEvent, press, typeKey } from "./helpers/keyboard";
@@ -66,6 +67,71 @@ describe("CalendarController", () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     await delay(50);
+  });
+
+  it("announces only committed date changes after focus with authored wording", async () => {
+    const calendar = document.querySelector<HTMLElement>("#calendar");
+    const first = calendar?.querySelector<HTMLElement>("[data-date='2026-05-20']");
+    const second = calendar?.querySelector<HTMLElement>("[data-date='2026-05-21']");
+    if (!calendar || !first || !second) throw new Error("Expected calendar and dates");
+    const announcements: { message: string; afterFocus: boolean; selected: string | null }[] = [];
+    const listener = new AbortController();
+    window.addEventListener(
+      "stimeo--announcer:announce",
+      (event) => {
+        announcements.push({
+          message: (event as CustomEvent<{ message: string }>).detail.message,
+          afterFocus: announcesAfterFocus(event),
+          selected:
+            calendar.querySelector("[aria-selected=true]")?.getAttribute("data-date") ?? null,
+        });
+      },
+      { signal: listener.signal },
+    );
+    try {
+      first.click();
+      expect(announcements).toEqual([]);
+
+      calendar.setAttribute("data-stimeo--calendar-announce-text-value", "選択日：{date}");
+      calendar.setAttribute("data-stimeo--calendar-locale-value", "ja");
+      await tick();
+      first.click();
+      expect(announcements).toEqual([]);
+
+      second.focus();
+      press(second, "Enter");
+      expect(announcements).toEqual([
+        { message: "選択日：2026年5月21日", afterFocus: true, selected: "2026-05-21" },
+      ]);
+
+      calendar.setAttribute("data-stimeo--calendar-selected-value", "2026-05-20");
+      await tick();
+      expect(announcements).toHaveLength(1);
+    } finally {
+      listener.abort();
+    }
+  });
+
+  it("announces the latest day if a select listener picks again", () => {
+    const calendar = document.querySelector<HTMLElement>("#calendar");
+    const first = calendar?.querySelector<HTMLElement>("[data-date='2026-05-20']");
+    const second = calendar?.querySelector<HTMLElement>("[data-date='2026-05-21']");
+    if (!calendar || !first || !second) throw new Error("Expected calendar and dates");
+    calendar.setAttribute("data-stimeo--calendar-announce-text-value", "Selected date: {date}");
+    calendar.addEventListener("stimeo--calendar:select", () => second.click(), { once: true });
+    const listener = new AbortController();
+    const messages: string[] = [];
+    window.addEventListener(
+      "stimeo--announcer:announce",
+      (event) => messages.push((event as CustomEvent<{ message: string }>).detail.message),
+      { signal: listener.signal },
+    );
+    try {
+      first.click();
+      expect(messages).toEqual(["Selected date: May 21, 2026"]);
+    } finally {
+      listener.abort();
+    }
   });
 
   it.each(
@@ -400,7 +466,7 @@ describe("CalendarController", () => {
     expect(days[41]?.getAttribute("aria-disabled")).toBeNull();
   });
 
-  it("navigates months with prev/next buttons", async () => {
+  it("navigates months through the prev and next actions", async () => {
     const controller = application.getControllerForElementAndIdentifier(
       document.getElementById("calendar") as HTMLElement,
       "stimeo--calendar",
@@ -602,7 +668,7 @@ describe("CalendarController", () => {
     await expectNoA11yViolations(document.getElementById("calendar") as HTMLElement);
   });
 
-  it("announces selected gridcell role, state, and label in order before and after selection", async () => {
+  it("announces gridcell role, text, and selection state in order before and after selection", async () => {
     const days = document.querySelectorAll("[data-stimeo--calendar-target='day']");
     const initialSelected = days[35] as HTMLElement; // May 31 (initially selected)
 
@@ -1079,8 +1145,8 @@ describe("CalendarController", () => {
       expect(owned.getAttribute("aria-disabled")).toBe("true");
       expect(owned.hasAttribute("data-stimeo--calendar-owns-disabled")).toBe(true);
 
-      // Same month, re-painted: the authored value describes a date the cell still
-      // shows, so it survives.
+      // The authored value remains unchanged immediately after requesting another
+      // selection in the same month, before the Value callback is delivered.
       const authored = days().find((el) => el.dataset.date === "2026-05-20") as HTMLElement;
       authored.setAttribute("aria-disabled", "true");
       (document.getElementById("calendar") as HTMLElement).setAttribute(

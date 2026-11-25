@@ -112,17 +112,17 @@ describe("AnnouncerController", () => {
     expect(polite().textContent).toBe("Saved");
   });
 
-  it("handles an event dispatched on the element exactly once (no double-announce)", async () => {
+  it("handles an element-dispatched event with one observer delivery during the first announcement pass", async () => {
     await start();
     let writes = 0;
-    // Observe how many times the region text is (re)written by spying on the node.
+    // Count observer deliveries during the first announcement pass.
     const region = polite();
     const observer = new MutationObserver(() => {
       writes += 1;
     });
     observer.observe(region, { childList: true, characterData: true, subtree: true });
-    // Dispatch on the element with bubbles:true — reaches the element AND window
-    // listener, but the WeakSet guard must keep it to a single announcement.
+    // Dispatch a bubbling event on the element so both its listener and the window
+    // listener receive the same request.
     announce({ message: "Once" }, root());
     await tick();
     observer.disconnect();
@@ -157,13 +157,13 @@ describe("AnnouncerController", () => {
     vi.useRealTimers();
   });
 
-  it("does not re-announce identical text when dedupeReannounce is false", async () => {
+  it("keeps the same text when dedupeReannounce is false", async () => {
     await start(`data-stimeo--announcer-dedupe-reannounce-value="false"`);
     announce({ message: "Saved" });
     await tick();
     announce({ message: "Saved" });
     await tick();
-    // Region keeps the text without the clear-then-reset cycle.
+    // The region still contains the same text after the second request.
     expect(polite().textContent).toBe("Saved");
   });
 
@@ -1085,7 +1085,7 @@ describe("AnnouncerController", () => {
     expect(document.querySelectorAll('[aria-live="assertive"]').length).toBe(1);
   });
 
-  it("speaks a message queued as turbo:before-cache arrives", async () => {
+  it("writes a queued message to the live region after turbo:before-cache", async () => {
     await start();
     announce({ message: "Spoken" });
     // A path that keeps the page dispatches it while the message waits for its pass.

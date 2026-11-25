@@ -4,6 +4,7 @@ import {
   canTakeFocus,
   isRenderedForFocus,
   isTabStop,
+  isUncheckedRadioInCheckedGroup,
   tabStopsWithin,
 } from "../utils/focus_candidate";
 import { ListenerSet } from "../utils/listener_set";
@@ -33,14 +34,17 @@ import { ListenerSet } from "../utils/listener_set";
  * adds `hidden`, and animate off `data-state`) and any semantics like
  * `role="alert"`. Focus retreats to, in order: the `fallback` target → the next
  * focusable element after the root → the previous one → `document.body` as a
- * last resort (weak focus; prefer providing a `fallback`).
+ * last resort (weak focus; prefer providing a `fallback`). Automatic destinations
+ * use a native radio group's checked Tab stop, or its first eligible member going
+ * forward and its last going backward when none is checked.
  *
  * A dismissal acts once, on the root present then. A root that arrives later — in
  * one task, or after an earlier one leaves in a later task — is open: it gets
  * `data-state="open"` when it carries no `data-state`, silently. A root that stops
- * resolving as the target gets that default back; what a dismissal wrote stays, and so
- * does it on a root of a page Turbo restores, which carries the default an earlier
- * connection wrote, the first root or not.
+ * resolving as the target while it stays on the page gets its authored `data-state`
+ * and `hidden` back, including after a dismissal and on a restored copy. Later page
+ * writes stay. Moving a root within its scope or detaching its whole host keeps the
+ * current state for the next connection.
  */
 export class DismissibleController extends Controller<HTMLElement> {
   static override targets = ["root", "fallback"];
@@ -60,8 +64,10 @@ export class DismissibleController extends Controller<HTMLElement> {
   declare modeValue: string;
   declare closeOnEscapeValue: boolean;
 
-  /** Owns the `open` default written on a root, so one that departs gets its own value back. */
-  readonly #openDefault = new AttributeLease<HTMLElement>("data-state", this.identifier);
+  /** Owns each root's state writes, returning its authored value when it leaves the scope. */
+  readonly #state = new AttributeLease<HTMLElement>("data-state", this.identifier);
+  /** Owns the hidden attribute a hide dismissal lends to its root. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
   /** Whether `connect()` has run for this connection; target callbacks arrive outside it too. */
   #connected = false;
   /** The Escape listener, held while connected with `closeOnEscape` on. */
@@ -76,6 +82,9 @@ export class DismissibleController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#escapeListeners.dispose();
+    if (this.element.isConnected && !this.scope.containsElement(this.element)) {
+      this.#returnRoot(this.element);
+    }
   }
 
   /**
@@ -84,17 +93,19 @@ export class DismissibleController extends Controller<HTMLElement> {
    */
   rootTargetConnected(root: HTMLElement): void {
     if (!this.#connected) return;
-    if (!this.rootTargets.includes(this.element)) this.#openDefault.return(this.element);
+    if (!this.rootTargets.includes(this.element)) this.#returnRoot(this.element);
     this.#establishOpen(root);
   }
 
   /**
-   * Gives a root that no longer resolves as the target its own `data-state` back — after
+   * Gives a root that stays on the page outside the target set its own attributes back — after
    * `disconnect()` too, since dropping the identifier leaves the element on the page — and,
    * while connected, writes the `open` default onto the root left.
    */
   rootTargetDisconnected(root: HTMLElement): void {
-    if (!this.rootTargets.includes(root)) this.#openDefault.return(root);
+    if ((root.isConnected || this.element.isConnected) && !this.rootTargets.includes(root)) {
+      this.#returnRoot(root);
+    }
     if (this.#connected && this.hasRootTarget) this.#establishOpen(this.rootTarget);
   }
 
@@ -130,7 +141,13 @@ export class DismissibleController extends Controller<HTMLElement> {
 
   /** Writes `data-state="open"` onto `root` when it carries no `data-state`. */
   #establishOpen(root: HTMLElement): void {
-    if (!root.hasAttribute("data-state")) this.#openDefault.write(root, "open");
+    if (!root.hasAttribute("data-state")) this.#state.write(root, "open");
+  }
+
+  /** Returns this root's leased state and visibility while preserving later page writes. */
+  #returnRoot(root: HTMLElement): void {
+    this.#state.return(root);
+    this.#hidden.return(root);
   }
 
   /** The element to dismiss: the explicit `root` target, or the host element. */
@@ -144,13 +161,13 @@ export class DismissibleController extends Controller<HTMLElement> {
     const mode = this.modeValue === "hide" ? "hide" : "remove";
 
     this.#retreatFocus(root);
-    root.setAttribute("data-state", "closing");
+    this.#state.write(root, "closing");
     // Dispatch before removal so a listener on the (about-to-leave) element still
     // runs; `dispatch` fires synchronously on `this.element`.
     this.dispatch("dismiss", { detail: { mode } });
 
     if (mode === "hide") {
-      root.hidden = true;
+      this.#hidden.write(root, "");
     } else {
       root.remove();
     }
@@ -184,7 +201,9 @@ export class DismissibleController extends Controller<HTMLElement> {
       yield explicitFallback;
     }
 
-    const candidates = tabStopsWithin(document);
+    const candidates = tabStopsWithin(document).filter(
+      (element) => !isUncheckedRadioInCheckedGroup(element),
+    );
     for (const element of candidates) {
       if (
         element === explicitFallback ||

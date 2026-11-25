@@ -31,7 +31,7 @@ describe("FormDataProjection", () => {
     holds.length = 0;
     document.body.innerHTML = "";
   });
-  it("keeps public names, duplicate values and entry order while projecting once", () => {
+  it("preserves duplicate entry names and their order while projecting the held field once", () => {
     const { form, field } = fixture();
     let calls = 0;
     const projection = hold();
@@ -173,7 +173,7 @@ describe("FormDataProjection", () => {
     form.remove();
     expect(dispatchFormData(form).getAll("same")).toEqual(["before", "detached", "after"]);
   });
-  it("prepares a new detached form without altering unrelated entries", () => {
+  it("prepares a new detached form for projection", () => {
     const { field } = fixture();
     hold().hold(field, () => "new-form");
     const form = document.createElement("form");
@@ -182,7 +182,7 @@ describe("FormDataProjection", () => {
     prepareFormDataProjection(form);
     expect([...dispatchFormData(form)]).toEqual([["same", "new-form"]]);
   });
-  it("retains prior payload edits, File contents and later consumer entries", async () => {
+  it("preserves projected entries and a File added by a subsequent formdata listener", async () => {
     const { form, field } = fixture();
     hold().hold(field, (value) => (value === "raw" ? "produced" : value));
     form.addEventListener("formdata", (event) =>

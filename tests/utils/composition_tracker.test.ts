@@ -80,9 +80,10 @@ describe("CompositionTracker", () => {
     expect(onEnd).toHaveBeenCalledTimes(1);
   });
 
-  /** Dispatches the `input` an engine sends, with the kind it reports (if any). */
-  const sendInput = (target: EventTarget, inputType?: string): InputEvent => {
-    const event = new InputEvent("input", { bubbles: true, ...(inputType ? { inputType } : {}) });
+  /** Dispatches an input with the given trust and kind reported to the tracker. */
+  const sendInput = (target: EventTarget, inputType?: string, isTrusted = true): InputEvent => {
+    const event = new InputEvent("input", { bubbles: true, inputType });
+    Object.defineProperty(event, "isTrusted", { value: isTrusted });
     target.dispatchEvent(event);
     return event;
   };
@@ -130,8 +131,39 @@ describe("CompositionTracker", () => {
 
     for (const inputType of ["insertCompositionText", "insertFromComposition"]) {
       input.dispatchEvent(new CompositionEvent("compositionend"));
-      expect(tracker.consumesConfirmedInput(sendInput(input, inputType))).toBe(true);
+      expect(tracker.consumesConfirmedInput(sendInput(input, inputType, false))).toBe(true);
     }
+  });
+
+  it("keeps the window across blur and input the consumer has not asked about", () => {
+    const first = document.createElement("input");
+    const second = document.createElement("input");
+    document.body.append(first, second);
+    tracker = new CompositionTracker();
+    tracker.observe(first);
+
+    first.focus();
+    expect(document.activeElement).toBe(first);
+    first.dispatchEvent(new CompositionEvent("compositionend"));
+    second.focus();
+    expect(document.activeElement).toBe(second);
+    sendInput(first, "insertText");
+    expect(tracker.consumesConfirmedInput(sendInput(first))).toBe(true);
+  });
+
+  it.each([
+    ["a plain event", () => new Event("input", { bubbles: true })],
+    ["an input event with an empty kind", () => new InputEvent("input", { bubbles: true })],
+  ] as const)("passes %s from a script through and closes the window", (_name, createEvent) => {
+    const input = document.createElement("input");
+    tracker = new CompositionTracker();
+    tracker.observe(input);
+
+    input.dispatchEvent(new CompositionEvent("compositionend"));
+    const event = createEvent();
+    input.dispatchEvent(event);
+    expect(tracker.consumesConfirmedInput(event)).toBe(false);
+    expect(tracker.consumesConfirmedInput(sendInput(input))).toBe(false);
   });
 
   it("passes an edit through even when it lands right after a confirmation", () => {
@@ -1415,13 +1447,13 @@ describe("CompositionTracker", () => {
     one.focus();
     startComposing(one);
 
-    // The window lost focus: the field is still the document's active element.
+    // Dispatch blur while the field remains the document's active element.
     one.dispatchEvent(new FocusEvent("blur"));
     two.dispatchEvent(new FocusEvent("blur"));
     expect(tracker.isComposing()).toBe(true);
 
-    // Moving or removing the field takes focus with no compositionend before it, and
-    // leaves the composition's text in place: nothing was overwritten.
+    // Move focus to the other field without sending compositionend or overwriting
+    // the composing text.
     two.focus();
 
     expect(tracker.isComposing()).toBe(false);
@@ -1529,7 +1561,8 @@ describe("CompositionTracker", () => {
     expect(calls).toEqual([["start", true]]);
     calls.length = 0;
 
-    // The first conversion was dropped silently; the next one starts on another field.
+    // Starting a conversion on the second field abandons the first and calls onAbandon
+    // before onStart.
     second.dispatchEvent(new CompositionEvent("compositionstart"));
 
     expect(calls).toEqual([
@@ -1555,9 +1588,9 @@ describe("CompositionTracker", () => {
     // The field itself was never observed, so releasing it releases nothing.
     tracker.unobserve(field);
 
-    expect(
-      tracker.consumesConfirmedInput({ target: field, inputType: "insertCompositionText" }),
-    ).toBe(true);
+    expect(tracker.consumesConfirmedInput(sendInput(field, "insertCompositionText", false))).toBe(
+      true,
+    );
   });
 
   it("owes no confirming input for a composition that ended without one", () => {

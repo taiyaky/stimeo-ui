@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { isRtl } from "../utils/logical_scroll";
 import type { StateReason } from "../utils/state_reason";
 import { targetSelector } from "../utils/target_selector";
@@ -35,6 +36,11 @@ import { targetSelector } from "../utils/target_selector";
  * it reads the container's writing direction for the arrow keys, falling back to
  * the controller element when the target is absent.
  *
+ * The tabs' `aria-selected` and `tabindex` and the panels' `hidden` are borrowed.
+ * A target role or controller identifier leaving returns authored values, keeping
+ * subsequent page writes. In-scope moves and whole-root detach keep the current
+ * selection, and ownership records retain originals across cache copies.
+ *
  * Behavior provided:
  * - Click a tab to select it.
  * - The forward horizontal arrow (`ArrowRight`, or `ArrowLeft` when the tablist is
@@ -56,6 +62,10 @@ export class TabsController extends Controller<HTMLElement> {
   declare readonly hasListTarget: boolean;
   declare readonly tabTargets: HTMLButtonElement[];
   declare readonly panelTargets: HTMLElement[];
+
+  readonly #selected = new AttributeLease<HTMLElement>("aria-selected", this.identifier);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
 
   /** Whether selection moves are reported: set once `connect()` settled the baseline. */
   #reporting = false;
@@ -82,6 +92,19 @@ export class TabsController extends Controller<HTMLElement> {
    */
   override disconnect(): void {
     this.#reporting = false;
+  }
+
+  /** Returns a tab's authored state when its target role or controller identifier leaves. */
+  tabTargetDisconnected(tab: HTMLButtonElement): void {
+    if (this.scope.containsElement(tab) && this.tabTargets.includes(tab)) return;
+    this.#selected.return(tab);
+    this.#tabindex.return(tab);
+  }
+
+  /** Returns a panel's visibility while retaining whole-root detach and in-scope moves. */
+  panelTargetDisconnected(panel: HTMLElement): void {
+    if (this.scope.containsElement(panel) && this.panelTargets.includes(panel)) return;
+    this.#hidden.return(panel);
   }
 
   /** Selects the clicked tab. Bound via `data-action` (click). */
@@ -144,11 +167,11 @@ export class TabsController extends Controller<HTMLElement> {
     const previous = tabs.findIndex((tab) => tab.getAttribute("aria-selected") === "true");
     tabs.forEach((tab, i) => {
       const selected = i === index;
-      tab.setAttribute("aria-selected", selected ? "true" : "false");
-      tab.tabIndex = selected ? 0 : -1;
+      this.#selected.write(tab, selected ? "true" : "false");
+      this.#tabindex.write(tab, selected ? "0" : "-1");
     });
     this.panelTargets.forEach((panel, i) => {
-      panel.hidden = i !== index;
+      this.#hidden.write(panel, i !== index ? "" : null);
     });
     if (previous !== index && this.#reporting) {
       this.dispatch("change", {

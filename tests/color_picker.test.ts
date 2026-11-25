@@ -8,12 +8,6 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link ColorPickerController}: per-channel APG Slider
- * values, HSL↔hex two-way sync, the `--stimeo--color` custom property, the hidden
- * field mirror, `aria-valuetext`, and the `change` event.
- */
-
 const markup = (attrs = "", { alpha = false } = {}) => `
   <div data-controller="stimeo--color-picker" ${attrs}>
     <div role="slider" aria-label="Hue" data-channel="hue" tabindex="0"
@@ -46,6 +40,11 @@ const markup = (attrs = "", { alpha = false } = {}) => `
     <input type="hidden" data-stimeo--color-picker-target="field" />
   </div>`;
 
+/**
+ * Behavioral tests for {@link ColorPickerController}: per-channel APG Slider
+ * values, HSL↔hex two-way sync, the `--stimeo--color` custom property, the hidden
+ * field mirror, `aria-valuetext`, and the `change` event.
+ */
 describe("ColorPickerController", () => {
   let application: Application;
 
@@ -591,8 +590,7 @@ describe("ColorPickerController", () => {
       details.push((event as CustomEvent<{ value: string }>).detail);
     });
 
-    // Hue 360 renders the same red as hue 0, and Home at hue 0 does not move at
-    // all. Neither is a color the user changed.
+    // End and Home move the hue between 0 and 360, which render the same red.
     press(slider("hue"), "End");
     press(slider("hue"), "Home");
     expect(details).toEqual([]);
@@ -970,7 +968,7 @@ describe("ColorPickerController", () => {
     expect(stray.getAttribute("aria-valuetext")).toBe("Saturation 100 percent");
   });
 
-  it("survives a hex confirmation when the markup has no hex input", async () => {
+  it("ignores a hex confirmation from an input without the hex target declaration", async () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--color-picker" data-stimeo--color-picker-value-value="#ff0000">
         <div role="slider" aria-label="Hue" data-channel="hue" tabindex="0"

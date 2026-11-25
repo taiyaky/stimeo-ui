@@ -159,7 +159,17 @@ export class CarouselController extends Controller<HTMLElement> {
   declare intervalValue: number;
   declare loopValue: boolean;
 
-  readonly #roving = new RovingTabindex(() => this.pickerTargets);
+  readonly #slideState = new AttributeLease<HTMLElement>("data-state", this.identifier);
+  readonly #slideHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  readonly #slideInert = new AttributeLease<HTMLElement>("inert", this.identifier);
+  readonly #pickerSelected = new AttributeLease<HTMLElement>("aria-selected", this.identifier);
+  readonly #pickerTabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #roving = new RovingTabindex(
+    () => this.pickerTargets,
+    (picker, tabindex) => {
+      this.#pickerTabindex.write(picker, String(tabindex));
+    },
+  );
   readonly #reconcileTargets = new MorphRenderWatcher(() => this.#reconcileTargetSet());
   readonly #intervals = new SafeInterval();
   /** Unreachable step controls and the toggle of a carousel that cannot rotate. */
@@ -293,6 +303,11 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#hiddenPaused = false;
     this.#activeSlide = null;
     this.#returnLeases();
+    if (
+      !(this.element.getAttribute("data-controller") ?? "").split(/\s+/).includes(this.identifier)
+    ) {
+      this.#returnTargetLeases();
+    }
     this.#gate.disconnected(this, () => this.#endRun());
   }
 
@@ -305,13 +320,17 @@ export class CarouselController extends Controller<HTMLElement> {
    * repaint re-derives every picker from `#index`, so a late arrival never steals
    * the selection.
    */
-  pickerTargetConnected(picker: HTMLElement): void {
-    picker.tabIndex = -1;
+  pickerTargetConnected(): void {
     this.#reconcileTargets.schedule();
   }
 
   /** Repairs selection and roving after a picker leaves a retained carousel. */
-  pickerTargetDisconnected(): void {
+  pickerTargetDisconnected(picker: HTMLElement): void {
+    queueMicrotask(() => {
+      if (this.pickerTargets.includes(picker)) return;
+      this.#pickerSelected.return(picker);
+      this.#pickerTabindex.return(picker);
+    });
     this.#reconcileTargets.schedule();
   }
 
@@ -321,7 +340,13 @@ export class CarouselController extends Controller<HTMLElement> {
   }
 
   /** Re-clamps the active index after a slide is removed. */
-  slideTargetDisconnected(): void {
+  slideTargetDisconnected(slide: HTMLElement): void {
+    queueMicrotask(() => {
+      if (this.slideTargets.includes(slide)) return;
+      this.#slideState.return(slide);
+      this.#slideHidden.return(slide);
+      this.#slideInert.return(slide);
+    });
     this.#reconcileTargets.schedule();
   }
 
@@ -691,10 +716,10 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#activeSlide = this.slideTargets[this.#index] ?? null;
     this.slideTargets.forEach((slide, i) => {
       const active = i === this.#index;
-      setAttributeIfChanged(slide, "data-state", active ? "active" : "inactive");
-      if (slide.hidden !== !active) slide.hidden = !active;
+      this.#slideState.write(slide, active ? "active" : "inactive");
+      this.#slideHidden.write(slide, active ? null : "");
       // `hidden` alone is a style a slide track's own CSS overrides; `inert` is not.
-      slide.toggleAttribute("inert", !active);
+      this.#slideInert.write(slide, active ? null : "");
     });
     // The picker set can be shorter than the slide set (a picker removed on its
     // own, or a carousel that only pickers part of its slides). Resolving the
@@ -703,7 +728,7 @@ export class CarouselController extends Controller<HTMLElement> {
     // strand the tablist outside the Tab sequence.
     const pickerIndex = Math.min(this.#index, this.pickerTargets.length - 1);
     this.pickerTargets.forEach((picker, i) => {
-      setAttributeIfChanged(picker, "aria-selected", i === pickerIndex ? "true" : "false");
+      this.#pickerSelected.write(picker, i === pickerIndex ? "true" : "false");
     });
     this.#syncStepControls();
     this.#roving.setActive(pickerIndex, { focus });
@@ -855,6 +880,15 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#ariaPressed.returnAll();
     this.#ariaLive.returnAll();
     this.#ariaAtomic.returnAll();
+  }
+
+  /** Returns slide and picker state after the controller itself has left its scope. */
+  #returnTargetLeases(): void {
+    this.#slideState.returnAll();
+    this.#slideHidden.returnAll();
+    this.#slideInert.returnAll();
+    this.#pickerSelected.returnAll();
+    this.#pickerTabindex.returnAll();
   }
   /** Current `interval` declaration resolved against its numeric contract. */
   get #safeInterval(): number {

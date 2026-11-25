@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { BlurDeferral } from "../utils/blur_deferral";
 import { LayoutObserver } from "../utils/layout_observer";
 
@@ -51,9 +52,8 @@ const OVERFLOW_EPSILON = 1;
  *   the `ellipsis` item; when it fits, shows everything, hides the ellipsis and
  *   resets the expanded state (so a later collapse starts collapsed).
  * - The disclosure `trigger` toggles `aria-expanded` and the collapsed items,
- *   dispatching `stimeo--breadcrumb:toggle`. `toggle` is a no-op (no state
- *   change, no event) while the trail fits, so a hidden trigger can never be
- *   left reporting `aria-expanded="true"`.
+ *   dispatching `stimeo--breadcrumb:toggle`. `toggle` acts if the last measured
+ *   trail overflowed, including when the disclosure is temporarily absent.
  *
  * Layout requirements the behavior depends on:
  * - **The list must not wrap** (`white-space: nowrap` / `flex-wrap: nowrap`). A
@@ -68,30 +68,28 @@ const OVERFLOW_EPSILON = 1;
  *   items wins over the UA's `[hidden] { display: none }`); collapsing is
  *   expressed exclusively through the `hidden` attribute.
  *
- * Ownership of `hidden`: this controller owns the attribute on an element **for as
- * long as that element is a `collapsible` target and the controller is connected**.
- * Outside that window it does not write it:
- * - lose the marker while connected → the element becomes an always-visible item
- *   and the controller clears the `hidden` it owned;
- * - controller `disconnect()` → the collapsed state is left in the DOM on purpose,
- *   because that DOM is what Turbo caches and restores.
+ * The disclosure borrows `hidden` on the items and ellipsis, and `aria-expanded`
+ * on the trigger. An element that leaves those targets gets its authored value
+ * back, including when the identifier is removed from a trail that stays in the
+ * document. Moves within the same target scope and removal of the whole trail
+ * preserve its state, so Turbo can restore the disclosure as the user left it.
  *
  * A consumer that also wants to own `hidden` on the same element (for a reason of
  * its own) is not supported: the overflow measurement clears it on every pass to
  * read the expanded width.
  *
  * Focus safety: hiding the element the user is standing on would drop focus to
- * `<body>`. When a collapse would hide the focused item, focus moves to the
- * disclosure `trigger` first; when the ellipsis would be hidden while it holds
- * focus, the hide waits for `blur`.
+ * `<body>`. Before a collapse, the controller records whether an item holds focus,
+ * applies visibility, then moves that focus to the disclosure `trigger`. When the
+ * ellipsis would be hidden while it holds focus, the hide waits for `blur`.
  *
  * **Fail-safe when the disclosure is incomplete.** Collapsing needs all of
  * `list`, one `collapsible`, `ellipsis`, and `trigger`; miss any and the trail
  * degrades to a plain APG breadcrumb (every item visible, ellipsis hidden,
- * `aria-expanded="false"`, `toggle` a silent no-op). Hiding the middle items
+ * `aria-expanded="false"`). Hiding the middle items
  * with no control that can reveal them puts the path out of reach for good — a
- * too-wide trail is the cheaper failure. Watched at runtime, so a swap that
- * breaks the set releases the items and one that completes it starts collapsing.
+ * too-wide trail is the cheaper failure. The logical expanded state remains
+ * available to the next complete disclosure.
  */
 export class BreadcrumbController extends Controller<HTMLElement> {
   static override targets = ["list", "collapsible", "ellipsis", "trigger"];
@@ -101,20 +99,24 @@ export class BreadcrumbController extends Controller<HTMLElement> {
   declare readonly listTarget: HTMLElement;
   declare readonly collapsibleTargets: HTMLElement[];
   declare readonly ellipsisTarget: HTMLElement;
+  declare readonly ellipsisTargets: HTMLElement[];
   declare readonly triggerTarget: HTMLElement;
+  declare readonly triggerTargets: HTMLElement[];
   declare readonly hasListTarget: boolean;
   declare readonly hasEllipsisTarget: boolean;
   declare readonly hasTriggerTarget: boolean;
 
   /** Guards target callbacks that can fire outside the connected window. */
   #connected = false;
-  /** Whether the trail currently overflows its container. */
+  /** Whether the last complete trail measurement overflowed its container. */
   #overflowing = false;
   /** Whether the user has expanded the collapsed items via the disclosure. */
   #expanded = false;
   /** The list element currently observed (resize + mutations), if any. */
   #observedList: HTMLElement | null = null;
   #listMutations: MutationObserver | null = null;
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  readonly #triggerExpanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
   readonly #layout = new LayoutObserver(() => this.update());
 
   readonly #onListMutation = (): void => {
@@ -129,6 +131,7 @@ export class BreadcrumbController extends Controller<HTMLElement> {
   /** Starts observing for overflow and renders the initial state. */
   override connect(): void {
     this.#connected = true;
+    this.#overflowing = false;
     // The DOM is the source of truth on reconnect (Turbo cache restore / morph):
     // the trigger's `aria-expanded` is where the expanded state lives, so a trail
     // the user opened survives a back-navigation instead of silently re-collapsing.
@@ -170,7 +173,11 @@ export class BreadcrumbController extends Controller<HTMLElement> {
   }
 
   /** Re-measures when an `ellipsis` target leaves the disclosure set. */
-  ellipsisTargetDisconnected(): void {
+  ellipsisTargetDisconnected(element: HTMLElement): void {
+    if (this.#leftTargets(element, this.ellipsisTargets)) {
+      this.#deferredHide.releaseAll();
+      this.#hidden.return(element);
+    }
     this.#resync();
   }
 
@@ -180,38 +187,26 @@ export class BreadcrumbController extends Controller<HTMLElement> {
   }
 
   /** Re-measures when a `trigger` target leaves the disclosure set. */
-  triggerTargetDisconnected(): void {
+  triggerTargetDisconnected(element: HTMLElement): void {
+    if (this.#leftTargets(element, this.triggerTargets)) this.#triggerExpanded.return(element);
     this.#resync();
   }
 
-  /**
-   * Hands `hidden` back when an element stops being a `collapsible` target.
-   *
-   * The marker is the source of truth for what may be collapsed, so an element
-   * that loses it while the controller is live is an always-visible item again —
-   * and rendering only walks the *current* targets, so nothing else would ever
-   * clear the `hidden` this controller put there.
-   *
-   * The `#connected` guard is load-bearing, not defensive. Stimulus fires this
-   * callback for **every** target during teardown as well (`Context.disconnect()`
-   * stops the target observer after `disconnect()` has run), and there the
-   * collapsed DOM must survive untouched so Turbo's cache restores the trail in
-   * the state the user left it (see the ownership note in {@link BreadcrumbController}).
-   *
-   * @param element - the element that just left the `collapsible` target set
-   */
+  /** Hands `hidden` back before re-measuring the remaining targets. */
   collapsibleTargetDisconnected(element: HTMLElement): void {
-    if (this.#connected) element.hidden = false;
+    if (this.#leftTargets(element, this.collapsibleTargets)) this.#hidden.return(element);
     this.#resync();
+  }
+
+  #leftTargets(element: HTMLElement, targets: readonly HTMLElement[]): boolean {
+    return !this.scope.containsElement(element) || !targets.includes(element);
   }
 
   /**
    * Expands or re-collapses the trail and dispatches `toggle`.
    *
-   * No-op while the trail fits: there is nothing collapsed to reveal, and the
-   * (hidden) trigger would otherwise keep a stale `aria-expanded="true"` that
-   * surfaces pre-expanded the next time the trail overflows. No event is
-   * dispatched in that case.
+   * A trail that fits has nothing to expand. A temporarily incomplete
+   * disclosure can still change the state established by its last measurement.
    */
   toggle(): void {
     if (!this.#connected || !this.#overflowing) return;
@@ -227,9 +222,21 @@ export class BreadcrumbController extends Controller<HTMLElement> {
    */
   update(): void {
     if (!this.#connected) return;
-    this.#overflowing = this.#measureOverflow();
-    if (!this.#overflowing) this.#expanded = false;
+    if (this.#hasDisclosure()) {
+      this.#overflowing = this.#measureOverflow();
+      if (!this.#overflowing) this.#expanded = false;
+    }
     this.#render();
+  }
+
+  /** Whether every target needed to expose the collapsed items is present. */
+  #hasDisclosure(): boolean {
+    return (
+      this.hasListTarget &&
+      this.hasEllipsisTarget &&
+      this.hasTriggerTarget &&
+      this.collapsibleTargets.length > 0
+    );
   }
 
   /** Re-attaches the list observation (targets may have been swapped) and re-measures. */
@@ -285,21 +292,12 @@ export class BreadcrumbController extends Controller<HTMLElement> {
    * host's `clientWidth` would over-report the available space by its padding and
    * miss real overflow in a padded container.
    *
-   * With no `collapsible` items there is nothing to collapse, so the trail is
-   * never reported as overflowing (which also keeps the disclosure out of the
-   * tab order — a button controlling nothing).
-   *
-   * The full disclosure set is a precondition: collapsing without an `ellipsis`
-   * *and* a `trigger` would hide items behind a control that does not exist, so
-   * an incomplete set reports "not overflowing" and `#render` degrades the trail
-   * to a plain breadcrumb. Losing layout is recoverable; losing the path is not.
+   * The full disclosure set is a precondition for measuring. An incomplete
+   * set temporarily renders as a plain breadcrumb.
    */
   #measureOverflow(): boolean {
-    if (!this.hasListTarget || this.collapsibleTargets.length === 0) return false;
-    if (!this.hasEllipsisTarget || !this.hasTriggerTarget) return false;
-    for (const item of this.collapsibleTargets) item.hidden = false;
-    // No `hasEllipsisTarget` check: the line above already returned without one.
-    this.ellipsisTarget.hidden = true;
+    for (const item of this.collapsibleTargets) this.#hidden.write(item, null);
+    this.#hidden.write(this.ellipsisTarget, "");
     return this.listTarget.scrollWidth > this.listTarget.clientWidth + OVERFLOW_EPSILON;
   }
 
@@ -307,8 +305,8 @@ export class BreadcrumbController extends Controller<HTMLElement> {
    * Applies the collapsed/expanded state to the items, ellipsis, and trigger.
    */
   #render(): void {
-    const collapsed = this.#overflowing && !this.#expanded;
-    const showEllipsis = this.#overflowing && this.collapsibleTargets.length > 0;
+    const showEllipsis = this.#overflowing && this.#hasDisclosure();
+    const collapsed = showEllipsis && !this.#expanded;
 
     // Decided *before* the writes below: once a focused item is hidden the browser
     // drops focus to <body> and the information is gone.
@@ -317,12 +315,12 @@ export class BreadcrumbController extends Controller<HTMLElement> {
       this.hasTriggerTarget &&
       this.collapsibleTargets.some((i) => this.#holdsFocus(i));
 
-    for (const item of this.collapsibleTargets) item.hidden = collapsed;
+    for (const item of this.collapsibleTargets) this.#hidden.write(item, collapsed ? "" : null);
     if (this.hasEllipsisTarget) this.#applyEllipsisVisibility(showEllipsis);
     if (this.hasTriggerTarget) {
       // Never report expanded while the trail fits: nothing is collapsed to reveal.
-      const expanded = this.#overflowing && this.#expanded;
-      this.triggerTarget.setAttribute("aria-expanded", expanded ? "true" : "false");
+      const expanded = showEllipsis && this.#expanded;
+      this.#triggerExpanded.write(this.triggerTarget, expanded ? "true" : "false");
     }
     if (rescueFocus) this.triggerTarget.focus();
   }
@@ -338,19 +336,19 @@ export class BreadcrumbController extends Controller<HTMLElement> {
     const ellipsis = this.ellipsisTarget;
     if (show) {
       this.#deferredHide.releaseAll();
-      ellipsis.hidden = false;
+      this.#hidden.write(ellipsis, null);
       return;
     }
 
     const active = document.activeElement;
     if (active instanceof HTMLElement && ellipsis.contains(active)) {
-      ellipsis.hidden = false;
+      this.#hidden.write(ellipsis, null);
       this.#deferredHide.deferOnly(active);
       return;
     }
 
     this.#deferredHide.releaseAll();
-    ellipsis.hidden = true;
+    this.#hidden.write(ellipsis, "");
   }
 
   /** Whether `element` contains (or is) the currently focused element. */

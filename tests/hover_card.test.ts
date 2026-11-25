@@ -185,6 +185,68 @@ describe("HoverCardController", () => {
     expect(card().hidden).toBe(false);
   });
 
+  it.each(["trigger", "card"] as const)(
+    "keeps a visible card open when a focus exit leaves the pointer over the %s",
+    (target) => {
+      const hovered = target === "trigger" ? trigger() : card();
+      const matches = hovered.matches.bind(hovered);
+      const hover = vi
+        .spyOn(hovered, "matches")
+        .mockImplementation((selector) => selector === ":hover" || matches(selector));
+
+      controller().open();
+      vi.advanceTimersByTime(300);
+      trigger().focus();
+      outside().focus();
+      vi.advanceTimersByTime(200);
+      expect(card().hidden).toBe(false);
+
+      hover.mockRestore();
+      fire(hovered, "mouseleave");
+      vi.advanceTimersByTime(200);
+      expect(card().hidden).toBe(true);
+    },
+  );
+
+  it("honors an explicit close while the pointer is over the card", () => {
+    controller().open();
+    vi.advanceTimersByTime(300);
+    const element = card();
+    const matches = element.matches.bind(element);
+    const hover = vi
+      .spyOn(element, "matches")
+      .mockImplementation((selector) => selector === ":hover" || matches(selector));
+    controller().close();
+    vi.advanceTimersByTime(200);
+    expect(element.hidden).toBe(true);
+    hover.mockRestore();
+  });
+
+  it("keeps the first deadline and reason when an explicit close joins a focus exit", () => {
+    controller().open();
+    vi.advanceTimersByTime(300);
+    const element = card();
+    const matches = element.matches.bind(element);
+    const hover = vi
+      .spyOn(element, "matches")
+      .mockImplementation((selector) => selector === ":hover" || matches(selector));
+    const capture = captureStateEvents("stimeo--hover-card", ["close"]);
+    try {
+      trigger().focus();
+      outside().focus();
+      vi.advanceTimersByTime(100);
+      controller().close();
+      vi.advanceTimersByTime(99);
+      expect(element.hidden).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(element.hidden).toBe(true);
+      expect(capture.reasons()).toEqual(["focus"]);
+    } finally {
+      hover.mockRestore();
+      capture.stop();
+    }
+  });
+
   it("closes after focus leaves the card", () => {
     trigger().dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
     vi.advanceTimersByTime(300);
@@ -409,7 +471,7 @@ describe("HoverCardController", () => {
     expect(press.defaultPrevented).toBe(true);
   });
 
-  it("cleans up listeners and collapsed ARIA when the card target was removed", async () => {
+  it("drops scroll resources while absent and closes the retained state with Escape", async () => {
     disconnectAndStopApplication(application);
     await start('data-stimeo--hover-card-close-on-scroll-value="true"');
     fire(trigger(), "mouseenter");
@@ -418,10 +480,11 @@ describe("HoverCardController", () => {
     detachedCard.remove();
     await vi.advanceTimersByTimeAsync(0);
 
-    // The removal itself released the layer, so the press reaches whatever is below.
+    // The logical open state retains one Escape press while its card is absent.
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
     const firstEscape = keyEvent("Escape");
     keyboardPress(document.activeElement as HTMLElement, firstEscape);
-    expect(firstEscape.defaultPrevented).toBe(false);
+    expect(firstEscape.defaultPrevented).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
 
     root().append(detachedCard);
@@ -433,20 +496,17 @@ describe("HoverCardController", () => {
     expect(secondEscape.defaultPrevented).toBe(false);
   });
 
-  it("ignores an open request while the card target is absent", () => {
+  it("retains an open request while the card target is absent", () => {
     const capture = captureStateEvents("stimeo--hover-card");
     try {
       const detachedCard = card();
       detachedCard.remove();
       fire(trigger(), "mouseenter");
       expect(() => vi.advanceTimersByTime(300)).not.toThrow();
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
-      expect(capture.seen).toEqual([]);
-      const press = keyEvent("Escape");
-      keyboardPress(document.activeElement as HTMLElement, press);
-      expect(press.defaultPrevented).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(capture.names()).toEqual(["open"]);
 
-      // The same request opens the card once the target is back.
+      // Restoring the surface reflects the request without another state move.
       root().append(detachedCard);
       fire(trigger(), "mouseenter");
       vi.advanceTimersByTime(300);
@@ -860,7 +920,7 @@ describe("HoverCardController", () => {
       expect(card().hidden).toBe(true);
     });
 
-    it("releases the layer, the scroll dismissal, the pending close and aria-expanded when the shown card leaves", async () => {
+    it("drops scroll resources while the pending close and open ARIA survive absent content", async () => {
       disconnectAndStopApplication(application);
       await start('data-stimeo--hover-card-close-on-scroll-value="true"');
       openCard();
@@ -873,22 +933,27 @@ describe("HoverCardController", () => {
       departed.remove();
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
       expect(departed.hidden).toBe(true);
-      expect(departed.getAttribute("data-state")).toBe("closed");
+      expect(departed.getAttribute("data-state")).toBeNull();
+      expect(vi.getTimerCount()).toBe(1);
+      window.dispatchEvent(new Event("scroll"));
+      expect(capture.seen).toEqual([]);
+      vi.advanceTimersByTime(200);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
       expect(vi.getTimerCount()).toBe(0);
       expect(pressEscape()).toBe(false);
-      // No scroll listener is left: a card put back and shown by hand stays shown.
+      // No scroll listener is left after the pending close settles without a card.
       root().append(departed);
       departed.hidden = false;
       window.dispatchEvent(new Event("scroll"));
       expect(departed.hidden).toBe(false);
-      // Target churn is not a state move anyone made, so it reports nothing.
-      expect(capture.seen).toEqual([]);
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["pointer"]);
     });
 
     for (const order of ["removed first", "added first"] as const) {
-      it(`hands the next open to a card a morph swapped in (${order})`, async () => {
+      it(`carries the open state to a card a morph swapped in (${order})`, async () => {
         disconnectAndStopApplication(application);
         await start('data-stimeo--hover-card-close-on-scroll-value="true"');
         openCard();
@@ -905,9 +970,8 @@ describe("HoverCardController", () => {
         }
         await vi.advanceTimersByTimeAsync(0);
 
-        expect(trigger().getAttribute("aria-expanded")).toBe("false");
-        expect(arrived.hidden).toBe(true);
-        expect(pressEscape()).toBe(false);
+        expect(trigger().getAttribute("aria-expanded")).toBe("true");
+        expect(arrived.hidden).toBe(false);
         expect(capture.seen).toEqual([]);
 
         openCard();
@@ -915,23 +979,23 @@ describe("HoverCardController", () => {
         expect(trigger().getAttribute("aria-expanded")).toBe("true");
         window.dispatchEvent(new Event("scroll"));
         expect(arrived.hidden).toBe(true);
-        // The scroll close released the one layer this open took.
+        // The scroll close releases the retained layer.
         expect(pressEscape()).toBe(false);
-        expect(capture.names()).toEqual(["open", "close"]);
-        expect(capture.reasons()).toEqual(["pointer", "scroll"]);
+        expect(capture.names()).toEqual(["close"]);
+        expect(capture.reasons()).toEqual(["scroll"]);
       });
     }
 
-    it("writes the closed state onto a replacement card that arrives shown", async () => {
+    it("keeps a replacement card shown without another state report", async () => {
       openCard();
       const departed = card();
       const arrived = freshCard();
       arrived.hidden = false;
       departed.replaceWith(arrived);
       await vi.advanceTimersByTimeAsync(0);
-      expect(arrived.hidden).toBe(true);
-      expect(arrived.getAttribute("data-state")).toBe("closed");
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(arrived.hidden).toBe(false);
+      expect(arrived.getAttribute("data-state")).toBe("open");
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
       expect(capture.names()).toEqual(["open"]);
     });
 
@@ -991,7 +1055,7 @@ describe("HoverCardController", () => {
       controller().cardTargetDisconnected(departed);
       controller().disconnect();
       controller().cardTargetDisconnected(departed);
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
       expect(pressEscape()).toBe(false);
       expect(capture.names()).toEqual(["open"]);
     });

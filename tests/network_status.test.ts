@@ -8,17 +8,16 @@ import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 import { writeValueAttribute } from "./helpers/value_delivery";
 
-/**
- * Behavioral tests for {@link NetworkStatusController}: the initial
- * `navigator.onLine` read, online/offline event handling, banner toggling, the
- * duplicate-state guard, auto-hide, and listener teardown on disconnect.
- */
-
 /** Overrides `navigator.onLine` for the duration of a test. */
 const setOnline = (online: boolean) => {
   Object.defineProperty(navigator, "onLine", { value: online, configurable: true });
 };
 
+/**
+ * Behavioral tests for {@link NetworkStatusController}: the initial
+ * `navigator.onLine` read, online/offline event handling, banner toggling, the
+ * duplicate-state guard, auto-hide, and listener teardown on disconnect.
+ */
 describe("NetworkStatusController", () => {
   let application: Application;
 
@@ -137,7 +136,7 @@ describe("NetworkStatusController", () => {
     });
     window.dispatchEvent(new Event("online"));
     expect(offline().hidden).toBe(true);
-    // The transition completes: `change` fires after the banners are updated.
+    // With no recovery banner, going online hides the offline banner and emits change.
     expect(states).toEqual([true]);
   });
 
@@ -335,7 +334,7 @@ describe("NetworkStatusController", () => {
     vi.useRealTimers();
   });
 
-  it("clears the pending auto-hide timer on disconnect", async () => {
+  it("disconnect prevents a pending auto-hide from hiding the banner", async () => {
     vi.useFakeTimers();
     setOnline(false);
     mount(
@@ -351,7 +350,7 @@ describe("NetworkStatusController", () => {
       "stimeo--network-status",
     ) as NetworkStatusController;
     controller.disconnect();
-    // The timer was cleared, so the detached controller never touches the banner.
+    // The disconnected controller leaves the banner visible after the auto-hide deadline.
     vi.advanceTimersByTime(5000);
     expect(banner.hidden).toBe(false);
     vi.useRealTimers();
@@ -421,9 +420,8 @@ describe("NetworkStatusController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  it("announces the transitions through the shared announcer", async () => {
-    // The banner is the visual half. A region revealed at the moment of the change is
-    // not reliably read, so the wording goes to the page's announcer instead.
+  it("dispatches announcement requests with the transition's message and politeness", async () => {
+    // The transition sends the configured message and politeness to the page's announcer.
     const seen: Array<{ message: string; assertive: boolean }> = [];
     const spy = (event: Event) => {
       seen.push((event as CustomEvent<{ message: string; assertive: boolean }>).detail);
@@ -626,10 +624,15 @@ describe("NetworkStatusController", () => {
         await start();
         query(`[${TARGET}='${name}']`).remove();
         await tick();
+        const remaining = name === "offline" ? online() : offline();
         goOnline();
+        expect(root().getAttribute("data-state")).toBe("online");
+        expect(remaining.hidden).toBe(name === "online");
         goOffline();
-        await tick();
+        expect(root().getAttribute("data-state")).toBe("offline");
+        expect(remaining.hidden).toBe(name === "offline");
 
+        await tick();
         expect(root().getAttribute("data-state")).toBe("offline");
       },
     );
@@ -688,14 +691,16 @@ describe("NetworkStatusController", () => {
       setOnline(false);
       await start();
       const departed = offline();
-      departed.hidden = true;
+      expect(departed.getAttribute("hidden")).toBeNull();
+      departed.setAttribute("hidden", "until-found");
 
       departed.removeAttribute(TARGET);
       await tick();
-      departed.hidden = false;
+      expect(departed.getAttribute("hidden")).toBe("until-found");
       goOnline();
-
-      expect(departed.hidden).toBe(false);
+      expect(departed.getAttribute("hidden")).toBe("until-found");
+      goOffline();
+      expect(departed.getAttribute("hidden")).toBe("until-found");
     });
 
     it("gives the banners back their own hidden when the widget loses its controller", async () => {

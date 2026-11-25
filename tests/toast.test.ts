@@ -2040,10 +2040,17 @@ describe("ToastController", () => {
     expect(list().children.length).toBe(0);
   });
 
-  it("delegates interaction from a list that arrives after the only one left", async () => {
+  it("delegates to a later list after a morph removes the only list", async () => {
     const arrival = list().cloneNode(false) as HTMLOListElement;
     const region = list().parentElement as HTMLElement;
-    list().remove();
+    vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+    try {
+      list().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      list().remove();
+      expect(() => vi.runAllTicks()).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
     await tick();
     region.prepend(arrival);
     await tick();

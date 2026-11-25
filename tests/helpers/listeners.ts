@@ -3,41 +3,6 @@ import { afterEach, expect, it } from "vitest";
 import { disconnectAndStopApplication } from "./stimulus";
 import { tick } from "./timing";
 
-/**
- * Records the listeners registered on the page and whether the DOM still holds
- * each one, whatever released it: a matching `removeEventListener`, or the abort
- * of the signal it was added with.
- *
- * A teardown test that spies on `removeEventListener` only sees one of those two
- * ways out, so it fails for a controller that releases through a signal and
- * passes for one that removes with the wrong capture flag. The ledger instead
- * applies the DOM's own rules to every call and answers what is still live:
- *
- * - a registration is identified by its target, type, callback and capture flag,
- *   and repeating one that is live adds nothing — the repeat's signal is not
- *   recorded either, because the DOM ignores it too;
- * - `removeEventListener` releases the live registration with the same four;
- * - aborting the signal a registration was added with releases it, and a
- *   registration made with an already aborted signal is never live.
- *
- * Registrations whose target is an `AbortSignal` are the DOM's own bookkeeping
- * for the `signal` option and are not recorded. A `once` registration stays live
- * in the ledger until it is removed or its signal aborts; nothing that records
- * here relies on `once`.
- *
- * The ledger keeps the DOM's rules where happy-dom departs from them: happy-dom
- * still delivers to a listener added with an already aborted signal, which a
- * browser never registers, and its `removeEventListener` releases a listener
- * whatever capture flag the call names, where a browser keeps one whose flag
- * differs. A removal with the wrong flag therefore passes a delivery check in
- * this environment and still shows here as live.
- *
- * Call {@link recordListeners} where the recording should start, and
- * {@link ListenerLedger.restore} in the teardown. A ledger a test left recording
- * is restored after that test as well, so a failed expectation cannot leave the
- * patched methods in place for the tests after it.
- */
-
 /** One registration and whether the DOM still holds it. */
 export interface ListenerRecord {
   readonly target: EventTarget;
@@ -84,8 +49,36 @@ afterEach(() => {
 });
 
 /**
- * Starts recording every registration made on an element, a document, `window`
- * or any other target that shares their `addEventListener`.
+ * Records the listeners registered on the page and whether the DOM still holds
+ * each one, whatever released it: a matching `removeEventListener`, or the abort
+ * of the signal it was added with.
+ *
+ * A call-only removal spy misses releases through a signal and cannot tell
+ * whether the removal matched the registration's capture flag. The ledger
+ * instead applies the DOM's registration rules and answers what is still live:
+ *
+ * - a registration is identified by its target, type, callback and capture flag,
+ *   and repeating one that is live adds nothing — the repeat's signal is not
+ *   recorded either, because the DOM ignores it too;
+ * - `removeEventListener` releases the live registration with the same four;
+ * - aborting the signal a registration was added with releases it, and a
+ *   registration made with an already aborted signal is never live.
+ *
+ * The ledger omits every registration on an `AbortSignal`, including bookkeeping
+ * for the `signal` option. A `once` registration stays live in the ledger until
+ * it is removed or its signal aborts; nothing that records here relies on `once`.
+ *
+ * The ledger keeps the DOM's rules where happy-dom departs from them: happy-dom
+ * still delivers to a listener added with an already aborted signal, which a
+ * browser never registers, and its `removeEventListener` releases a listener
+ * whatever capture flag the call names, where a browser keeps one whose flag
+ * differs. A removal with the wrong flag therefore passes a delivery check in
+ * this environment and still shows here as live.
+ *
+ * Call {@link recordListeners} where the recording should start, and
+ * {@link ListenerLedger.restore} in the teardown. A ledger a test left recording
+ * is restored after that test as well, so a failed expectation cannot leave the
+ * patched methods in place for the tests after it.
  */
 export function recordListeners(): ListenerLedger {
   const records: ListenerRecord[] = [];
@@ -195,13 +188,20 @@ const defaultMarkup = (identifier: string): string =>
 
 /** The two runs each controller gets, with the title each test carries. */
 const RELEASE_RUNS = [
-  [1, "releases every listener on disconnect"],
-  [2, "releases every listener after connecting twice"],
+  [
+    1,
+    "releases all recorded listeners except declared document-lifetime registrations on disconnect",
+  ],
+  [
+    2,
+    "releases all recorded listeners except declared document-lifetime registrations after connecting twice",
+  ],
 ] as const;
 
 /**
  * Connects `controller` on its markup — once, or twice with no disconnect between —
- * disconnects it, and fails when a registration it made is still live, when it did
+ * disconnects it, and fails when a recorded registration remains live, except
+ * declared document-lifetime registrations. It also fails when the controller did
  * not connect, or when connecting or disconnecting reported an error.
  */
 export async function assertListenersReleased(
@@ -240,15 +240,16 @@ export async function assertListenersReleased(
 }
 
 /**
- * Registers, for every controller in `controllers`, that nothing its connection
- * registered survives the disconnect — once after a single `connect()`, and once
- * after a second `connect()` with no disconnect between. The second is a
+ * Registers, for every controller in `controllers`, that no recorded registration
+ * survives disconnect except declared document-lifetime registrations — once
+ * after a single `connect()`, and once after a second `connect()` with no
+ * disconnect between. The second is a
  * controller's own lifecycle called twice, which a set rebuilt on each connect
  * or a registration made again without releasing the first would survive.
  *
- * The host is generic, so this covers each controller's connect and disconnect
- * paths, not the ones its targets and Values open; the controller's own suite
- * covers those. The ledger each test starts is restored after it.
+ * The supplied markup or the generic default exercises the connection lifecycle.
+ * Controller suites cover the paths specific to their targets and Values. The
+ * ledger each test starts is restored after it.
  */
 export function describeListenerRelease(
   controllers: Readonly<Record<string, unknown>>,

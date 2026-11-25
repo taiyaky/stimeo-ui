@@ -10,20 +10,6 @@ import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link SidebarController}: the inline rail (toggle +
- * `localStorage` persistence), the responsive switch to an overlay off-canvas
- * panel (shared `FocusTrap`: focus move,
- * trap, `Escape`, scroll lock, background `inert`, restore), and teardown.
- *
- * `matchMedia` is mocked so the test drives the responsive mode: `matches` is the
- * `(min-width: breakpoint)` result (true = desktop/inline, false = mobile/overlay)
- * and {@link changeViewport} fires the `change` event the controller listens to.
- * happy-dom reports no transition duration, so ordinary close assertions hide
- * synchronously; dedicated cases stub the full transition tuple to exercise the
- * deferred path, terminal events, fallback, and target replacement.
- */
-
 interface MockMediaQuery {
   readonly media: string;
   readonly listeners: Set<(event: MediaQueryListEvent) => void>;
@@ -125,6 +111,19 @@ const dispatchPanelTransition = (
   panel.dispatchEvent(event);
 };
 
+/**
+ * Behavioral tests for {@link SidebarController}: the inline rail (toggle +
+ * `localStorage` persistence), the responsive switch to an overlay off-canvas
+ * panel (shared `FocusTrap`: focus move,
+ * trap, `Escape`, scroll lock, background `inert`, restore), and teardown.
+ *
+ * `matchMedia` is mocked so the test drives the responsive mode: `matches` is the
+ * `(min-width: breakpoint)` result (true = desktop/inline, false = mobile/overlay)
+ * and {@link changeViewport} fires the `change` event the controller listens to.
+ * happy-dom reports no transition duration, so ordinary close assertions hide
+ * synchronously; dedicated cases stub the full transition tuple to exercise the
+ * deferred path, terminal events, fallback, and target replacement.
+ */
 describe("SidebarController", () => {
   let application: Application;
 
@@ -319,9 +318,8 @@ describe("SidebarController", () => {
   });
 
   it("keeps the inline collapsed state across a reconnect when no key is set (DOM is source of truth)", async () => {
-    // No key → no localStorage. A Turbo cache restore / morph reconnects Stimulus
-    // over already-rendered markup; connect() must recover the live data-state
-    // instead of snapping back to the declared default.
+    // Reconnecting Stimulus over rendered markup recovers the inline state from
+    // data-state when no storage key is set.
     await start(`
       <div data-controller="stimeo--sidebar" data-stimeo--sidebar-breakpoint-value="768">
         <button id="trigger" data-stimeo--sidebar-target="trigger"
@@ -891,7 +889,7 @@ describe("SidebarController", () => {
     expect(panel().getAttribute("data-state")).toBe("collapsed");
   });
 
-  it("keeps an open overlay open, trap included, when its element moves within the page", async () => {
+  it("restores an open overlay and its modal behavior when the same controller reconnects", async () => {
     viewportWidth = 600;
     await start();
     trigger().click();
@@ -910,6 +908,30 @@ describe("SidebarController", () => {
     keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(panel().getAttribute("data-state")).toBe("closed");
     expect(document.body.style.overflow).toBe("");
+  });
+
+  it("keeps an overlay closed when the page closes its panel while detached", async () => {
+    viewportWidth = 600;
+    await start();
+    const instance = controller();
+    const root = instance.element;
+    const currentPanel = panel();
+    instance.open();
+
+    root.remove();
+    await tick();
+    currentPanel.setAttribute("data-state", "closed");
+    currentPanel.hidden = true;
+    document.body.append(root);
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(currentPanel.getAttribute("data-state")).toBe("closed");
+    expect(currentPanel.hidden).toBe(true);
+    expect(backdrop().hidden).toBe(true);
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(document.body.style.overflow).toBe("");
+    expect(document.querySelector("[inert]")).toBeNull();
   });
 
   it("keeps the durable inline preference through turbo:before-cache", async () => {
@@ -1031,6 +1053,127 @@ describe("SidebarController", () => {
     expect(document.body.style.overflow).toBe("");
   });
 
+  it("adopts a panel installed by an open listener before applying overlay focus", async () => {
+    viewportWidth = 600;
+    await start();
+    const sidebar = controller();
+    const previous = panel();
+    const successor = previous.cloneNode(true) as HTMLElement;
+    successor.setAttribute("data-state", "closed");
+    successor.hidden = true;
+    root().addEventListener("stimeo--sidebar:open", () => previous.replaceWith(successor), {
+      once: true,
+    });
+
+    sidebar.open();
+
+    expect(successor.getAttribute("data-state")).toBe("open");
+    expect(successor.hidden).toBe(false);
+    expect(document.activeElement).toBe(successor.querySelector("#first"));
+  });
+
+  it("reports one close when focusing a replacement while closing causes a close", async () => {
+    viewportWidth = 600;
+    await start();
+    const sidebar = controller();
+    sidebar.open();
+    const previous = panel();
+    const successor = previous.cloneNode(true) as HTMLElement;
+    successor.setAttribute("data-state", "closed");
+    successor.hidden = true;
+    previous.replaceWith(successor);
+    successor.querySelector("#first")?.addEventListener("focus", () => sidebar.close(), {
+      once: true,
+    });
+    const events = captureStateEvents("stimeo--sidebar", ["close"]);
+    try {
+      sidebar.close();
+
+      expect(events.names()).toEqual(["close"]);
+      expect(successor.hidden).toBe(true);
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("keeps a focus-driven reopening when a closed overlay receives another close request", async () => {
+    viewportWidth = 600;
+    await start();
+    vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
+    vi.useFakeTimers();
+    const sidebar = controller();
+    const opener = trigger();
+    opener.focus();
+    sidebar.open();
+    sidebar.close();
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(document.body.style.overflow).toBe("hidden");
+    opener.addEventListener("focus", () => sidebar.open(), { once: true });
+    const previous = panel();
+    const successor = previous.cloneNode(true) as HTMLElement;
+    successor.hidden = true;
+    previous.replaceWith(successor);
+    const events = captureStateEvents("stimeo--sidebar");
+    try {
+      sidebar.close();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(events.names()).toEqual(["open"]);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(successor.hidden).toBe(false);
+      expect(document.body.style.overflow).toBe("hidden");
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("applies the closed overlay state to a panel installed by a close listener", async () => {
+    viewportWidth = 600;
+    await start();
+    trigger().focus();
+    controller().open();
+    const previous = panel();
+    const successor = previous.cloneNode(true) as HTMLElement;
+    successor.setAttribute("data-mode", "inline");
+    successor.setAttribute("data-state", "open");
+    successor.hidden = false;
+    root().addEventListener("stimeo--sidebar:close", () => previous.replaceWith(successor), {
+      once: true,
+    });
+
+    controller().close();
+
+    expect(successor.getAttribute("data-mode")).toBe("overlay");
+    expect(successor.getAttribute("data-state")).toBe("closed");
+    expect(successor.hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("closes a backdrop installed by a close listener while the panel is absent", async () => {
+    viewportWidth = 600;
+    await start();
+    trigger().focus();
+    controller().open();
+    panel().remove();
+    await tick();
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(backdrop().hidden).toBe(true);
+    const previous = backdrop();
+    const successor = previous.cloneNode(true) as HTMLElement;
+    successor.setAttribute("data-state", "open");
+    successor.hidden = false;
+    root().addEventListener("stimeo--sidebar:close", () => previous.replaceWith(successor), {
+      once: true,
+    });
+
+    controller().close();
+
+    expect(successor.getAttribute("data-state")).toBe("closed");
+    expect(successor.hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
+  });
+
   it("rebinds the modal lifecycle to an open replacement panel", async () => {
     viewportWidth = 600;
     await start();
@@ -1144,7 +1287,7 @@ describe("SidebarController", () => {
     expect(added.hidden).toBe(true);
   });
 
-  it("closes the overlay with a rendered replacement that arrives before the open panel leaves", async () => {
+  it("keeps the overlay open on a closed replacement that arrives as the old panel leaves", async () => {
     viewportWidth = 600;
     await start();
     trigger().focus();
@@ -1159,15 +1302,15 @@ describe("SidebarController", () => {
     controller().panelTargetConnected(replacement);
 
     expect(replacement.getAttribute("data-mode")).toBe("overlay");
-    expect(replacement.getAttribute("data-state")).toBe("closed");
-    expect(replacement.hidden).toBe(true);
-    expect(backdrop().hidden).toBe(true);
-    expect(trigger().getAttribute("aria-expanded")).toBe("false");
-    expect(document.body.style.overflow).toBe("");
-    expect(document.activeElement).toBe(trigger());
+    expect(replacement.getAttribute("data-state")).toBe("open");
+    expect(replacement.hidden).toBe(false);
+    expect(backdrop().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(document.activeElement).toBe(replacement.querySelector("#first"));
   });
 
-  it("releases the overlay when the open panel is removed", async () => {
+  it("keeps the open state without a panel and lets Escape restore the opener", async () => {
     viewportWidth = 600;
     await start();
     const background = document.getElementById("background") as HTMLElement;
@@ -1180,13 +1323,16 @@ describe("SidebarController", () => {
 
     expect(backdrop().hidden).toBe(true);
     expect(backdrop().getAttribute("data-state")).toBe("closed");
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(background.inert).toBe(false);
+    keyboardPress(document.body, "Escape");
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
     expect(document.body.style.overflow).toBe("");
-    expect(background.inert).toBe(false);
     expect(document.activeElement).toBe(trigger());
   });
 
-  it("keeps a panel that left while open closed when it comes back", async () => {
+  it("restores the open state to a panel that comes back", async () => {
     viewportWidth = 600;
     await start();
     trigger().click();
@@ -1198,11 +1344,72 @@ describe("SidebarController", () => {
     parent.append(removed);
     controller().panelTargetConnected(removed);
 
-    expect(removed.getAttribute("data-state")).toBe("closed");
-    expect(removed.hidden).toBe(true);
-    expect(trigger().getAttribute("aria-expanded")).toBe("false");
-    expect(document.body.style.overflow).toBe("");
+    expect(removed.getAttribute("data-state")).toBe("open");
+    expect(removed.hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(document.body.style.overflow).toBe("hidden");
   });
+
+  it.each(["open", "close", "toggle", "Escape"] as const)(
+    "handles %s in the same task as replacing an open overlay with a closed panel",
+    async (action) => {
+      viewportWidth = 600;
+      await start();
+      trigger().focus();
+      controller().open();
+      const successor = panel().cloneNode(true) as HTMLElement;
+      successor.setAttribute("data-state", "closed");
+      successor.hidden = true;
+      const seen = captureStateEvents("stimeo--sidebar", undefined, root());
+      panel().replaceWith(successor);
+      if (action === "Escape") keyboardPress(document.body, "Escape");
+      else controller()[action]();
+      if (action === "open") {
+        expect(successor.getAttribute("data-state")).toBe("open");
+        expect(successor.hidden).toBe(false);
+        expect(document.activeElement).toBe(successor.querySelector("#first"));
+      }
+
+      await tick();
+      const remainsOpen = action === "open";
+      expect(successor.hidden).toBe(!remainsOpen);
+      expect(trigger().getAttribute("aria-expanded")).toBe(String(remainsOpen));
+      expect(seen.names()).toEqual(remainsOpen ? [] : ["close"]);
+      expect(document.activeElement).toBe(
+        remainsOpen ? successor.querySelector("#first") : trigger(),
+      );
+      seen.stop();
+    },
+  );
+
+  it.each(["settled", "same task"])(
+    "keeps the adopted panel shown through its exit when close follows a %s replacement",
+    async (timing) => {
+      viewportWidth = 600;
+      await start();
+      trigger().focus();
+      controller().open();
+      const current = panel();
+      const successor = current.cloneNode(true) as HTMLElement;
+      successor.setAttribute("data-state", "closed");
+      successor.hidden = true;
+      current.replaceWith(successor);
+      if (timing === "settled") await tick();
+      vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
+      vi.useFakeTimers();
+      const frames: Array<HTMLElement["hidden"]> = [];
+      root().addEventListener("stimeo--sidebar:close", () => frames.push(successor.hidden));
+
+      controller().close();
+      expect(frames).toEqual([false]);
+      expect(successor.hidden).toBe(false);
+      expect(document.body.style.overflow).toBe("hidden");
+      vi.advanceTimersByTime(250);
+      expect(successor.hidden).toBe(true);
+      expect(document.body.style.overflow).toBe("");
+      expect(document.activeElement).toBe(trigger());
+    },
+  );
 
   it("drops the close-transition wait when the closing panel is removed", async () => {
     viewportWidth = 600;
@@ -1223,7 +1430,26 @@ describe("SidebarController", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("keeps an open replacement that arrives before the closing panel leaves on screen", async () => {
+  it("opens while awaiting a panel and puts focus inside it on arrival", async () => {
+    viewportWidth = 600;
+    await start();
+    trigger().focus();
+    const original = panel();
+    original.remove();
+    await tick();
+
+    controller().open();
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(backdrop().hidden).toBe(true);
+    root().append(original);
+    await tick();
+
+    expect(original.hidden).toBe(false);
+    expect(backdrop().hidden).toBe(false);
+    expect(document.activeElement).toBe(original.querySelector("#first"));
+  });
+
+  it("finishes closing when an authored-open replacement overtakes the exit transition", async () => {
     viewportWidth = 600;
     await start();
     vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
@@ -1239,15 +1465,16 @@ describe("SidebarController", () => {
     closing.before(replacement);
     closing.remove();
     controller().panelTargetConnected(replacement);
-    expect(backdrop().hidden).toBe(false);
+    expect(backdrop().hidden).toBe(true);
 
     // The overtaken close would have settled by now.
     vi.advanceTimersByTime(250);
 
-    expect(replacement.hidden).toBe(false);
-    expect(backdrop().hidden).toBe(false);
-    expect(document.body.style.overflow).toBe("hidden");
-    expect(background.inert).toBe(true);
+    expect(replacement.hidden).toBe(true);
+    expect(backdrop().hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
+    expect(background.inert).toBe(false);
+    expect(document.activeElement).toBe(trigger());
   });
 
   // --- Responsive mode switching --------------------------------------------
@@ -1837,8 +2064,8 @@ describe("SidebarController", () => {
       const instance = controller();
       trigger().click();
       root().addEventListener("stimeo--sidebar:close", () => instance.disconnect());
-      // The close goes on after its handler returns and keeps the closing panel for the
-      // exit transition, so that panel leaving afterwards reaches the departure path.
+      // After the close subscriber disconnects the controller, the rest of close records
+      // the closing panel. Removing that panel must leave its successor unadopted.
       instance.close();
       const leaving = panel();
       const remaining = leaving.cloneNode(true) as HTMLElement;
@@ -1861,17 +2088,16 @@ describe("SidebarController", () => {
       expect((document.getElementById("background") as HTMLElement).inert).toBe(false);
     });
 
-    it("releases the modal the open handler's disconnect left once the closing panel leaves", async () => {
+    it("does not activate the trap when an open subscriber disconnects before focus moves", async () => {
       viewportWidth = 600;
       await start();
       const instance = controller();
       root().addEventListener("stimeo--sidebar:open", () => instance.disconnect(), { once: true });
       instance.open();
-      vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
-      keyboardPress(document.activeElement as HTMLElement, "Escape");
-      // The open went on after its handler disconnected the controller, so the modal is held
-      // through the exit transition.
-      expect(document.body.style.overflow).toBe("hidden");
+      const dismissal = keyEvent("Escape");
+      keyboardPress(document.body, dismissal);
+      expect(dismissal.defaultPrevented).toBe(false);
+      expect(document.body.style.overflow).toBe("");
       const leaving = panel();
       const remaining = leaving.cloneNode(true) as HTMLElement;
       for (const node of [
@@ -2009,7 +2235,7 @@ describe("SidebarController", () => {
       expect(document.activeElement?.id).toBe("ahead-first");
     });
 
-    it("gives a panel left in the page without its target token its own values back, and closes", async () => {
+    it("returns the values of a panel that loses its target token while keeping the overlay state", async () => {
       viewportWidth = 600;
       await start();
       trigger().focus();
@@ -2020,6 +2246,9 @@ describe("SidebarController", () => {
 
       expect(stateOf(departed)).toEqual(["inline", "expanded", false]);
       expect(backdrop().hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(document.body.style.overflow).toBe("hidden");
+      controller().close();
       expect(trigger().getAttribute("aria-expanded")).toBe("false");
       expect(document.body.style.overflow).toBe("");
       expect(document.activeElement).toBe(trigger());
@@ -2036,18 +2265,18 @@ describe("SidebarController", () => {
       expect(stateOf(departed)).toEqual(["inline", "expanded", false]);
     });
 
-    it("reveals a replacement overlay panel that arrives open but hidden", async () => {
+    it("keeps the overlay closed when a replacement's markup says open", async () => {
       viewportWidth = 600;
       await start();
       const replacement = panel().cloneNode(true) as HTMLElement;
       replacement.setAttribute("data-state", "open");
-      replacement.hidden = true;
+      replacement.hidden = false;
       panel().replaceWith(replacement);
       await tick();
 
-      expect(replacement.hidden).toBe(false);
-      expect(backdrop().getAttribute("data-state")).toBe("open");
-      expect(document.body.style.overflow).toBe("hidden");
+      expect(replacement.hidden).toBe(true);
+      expect(backdrop().getAttribute("data-state")).toBe("closed");
+      expect(document.body.style.overflow).toBe("");
     });
 
     it("gives the panel back its own values when the sidebar loses its controller", async () => {
@@ -2072,7 +2301,7 @@ describe("SidebarController", () => {
       await tick();
 
       expect(departed.getAttribute("hidden")).toBe("until-found");
-      expect(document.body.style.overflow).toBe("");
+      expect(document.body.style.overflow).toBe("hidden");
     });
 
     it("keeps what it wrote on a panel that leaves with the controller element", async () => {

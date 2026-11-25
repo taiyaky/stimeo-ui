@@ -1,6 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
-import { hasTabStop } from "../utils/focus_candidate";
+import { isUncheckedRadioInCheckedGroup, tabStopsWithin } from "../utils/focus_candidate";
 import { FontLoadWatcher } from "../utils/font_load_watcher";
 import { FrameCoalescer } from "../utils/frame_coalescer";
 import { LayoutObserver } from "../utils/layout_observer";
@@ -29,7 +29,9 @@ type Edge = "start" | "end";
  *
  * When content overflows and the viewport has no sequential Tab stop of its own,
  * the viewport receives a borrowed `tabindex="0"`. A named viewport also receives
- * a borrowed `role="region"`. Position is exposed through `data-scroll`, overflow
+ * a borrowed `role="region"`. Unchecked radios whose group has a usable checked
+ * radio outside the viewport do not supply a descendant Tab stop.
+ * Position is exposed through `data-scroll`, overflow
  * through `data-overflow`, and normalized progress through
  * `--stimeo--scroll-progress` so consumer CSS can render state without prescribing
  * appearance.
@@ -43,7 +45,8 @@ type Edge = "start" | "end";
  * @remarks
  * Behavior only. Scroll work is coalesced to one animation frame and never scans
  * descendants. Resize, content, accessible-name source, descendant-load, and font
- * completion changes run the full measurement pass. Every listener, observer,
+ * completion changes, and native radio selection changes run the full measurement pass.
+ * Every listener, observer,
  * animation frame, borrowed attribute, and state hook is released on disconnect.
  * Nothing is released on `turbo:before-cache`, which Turbo also dispatches on pages
  * that stay (a promoted frame navigation, a state-less `popstate`, a refresh of a cached
@@ -76,7 +79,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   );
 
   #viewport: HTMLElement | null = null;
-  /** The scroll listener on the current viewport; unbinding the viewport releases it. */
+  /** Scroll and radio-group listeners released when the current viewport is unbound. */
   readonly #viewportListeners = new ListenerSet();
   #content: MutationObserver | null = null;
   #nameSources: MutationObserver | null = null;
@@ -94,6 +97,13 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     // cancels the pending frame first, so the frame has a target by construction.
     const viewport = event.currentTarget as HTMLElement;
     this.#frames.schedule(() => this.#syncPosition(viewport, this.#overflowing));
+  };
+
+  /** Radio selection changes properties without producing content mutation records. */
+  readonly #onRadioChange = (event: Event): void => {
+    if (event.target instanceof HTMLInputElement && event.target.type === "radio") {
+      this.#refresh();
+    }
   };
 
   readonly #onFontsSettled = (): void => {
@@ -147,6 +157,9 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     }
 
     this.#viewportListeners.add(next, "scroll", this.#onScroll, { passive: true });
+    this.#viewportListeners.add(next.ownerDocument, "change", this.#onRadioChange, {
+      capture: true,
+    });
     this.#layout.observeDescendantLoads(next);
     this.#layout.observe(next);
     this.#bindContentObserver(next);
@@ -309,7 +322,9 @@ export class ScrollAreaController extends Controller<HTMLElement> {
 
   /** Borrows keyboard reach only when no usable descendant already owns a Tab stop. */
   #syncKeyboardReach(viewport: HTMLElement, overflowing: boolean): void {
-    const wantsTabindex = overflowing && !hasTabStop(viewport);
+    const wantsTabindex =
+      overflowing &&
+      !tabStopsWithin(viewport).some((candidate) => !isUncheckedRadioInCheckedGroup(candidate));
     if (!wantsTabindex) {
       this.#clearViewportAttributes(viewport);
       return;

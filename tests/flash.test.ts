@@ -56,6 +56,79 @@ describe("FlashController", () => {
   const regionEl = () => query("[data-stimeo--flash-target='region']");
   const flush = () => vi.advanceTimersByTimeAsync(0);
 
+  it.each([
+    ["target", null],
+    ["controller", null],
+    ["target", "alert"],
+    ["controller", "alert"],
+  ] as const)("returns message attributes on %s departure (role: %s)", async (departure, role) => {
+    await mount(region(message("notice", "Saved", role ? `role="${role}"` : "")));
+    const el = query<HTMLElement>("[data-stimeo--flash-target='message']");
+    expect(el.getAttribute("role")).toBe(role ?? "status");
+    expect(el.getAttribute("data-flash-state")).toBe("visible");
+    expect(el.hasAttribute("data-stimeo--flash-shown")).toBe(true);
+    if (departure === "target") el.removeAttribute("data-stimeo--flash-target");
+    else root().removeAttribute("data-controller");
+    await flush();
+
+    expect(el.isConnected).toBe(true);
+    expect(el.getAttribute("role")).toBe(role);
+    expect(el.hasAttribute("data-flash-state")).toBe(false);
+    expect(el.hasAttribute("data-stimeo--flash-shown")).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(el.isConnected).toBe(true);
+  });
+
+  it("keeps message attributes when the message moves or its flash is detached", async () => {
+    await mount(region(message("notice") + message("error")));
+    const host = root();
+    const area = regionEl();
+    const el = query<HTMLElement>("[data-stimeo--flash-target='message']");
+    area.append(el);
+    await flush();
+    expect(el.getAttribute("role")).toBe("status");
+    expect(el.getAttribute("data-flash-state")).toBe("visible");
+
+    host.remove();
+    await flush();
+    expect(el.getAttribute("role")).toBe("status");
+    expect(el.getAttribute("data-flash-state")).toBe("visible");
+    expect(el.hasAttribute("data-stimeo--flash-shown")).toBe(true);
+    document.body.append(host);
+    await flush();
+    expect(announces).toHaveLength(2);
+  });
+
+  it("returns the attributes of a message unmarked while its flash was detached", async () => {
+    await mount(region(message("notice")));
+    const host = root();
+    const el = query<HTMLElement>("[data-stimeo--flash-target='message']");
+    host.remove();
+    await flush();
+    expect(el.getAttribute("role")).toBe("status");
+    expect(el.getAttribute("data-flash-state")).toBe("visible");
+
+    el.removeAttribute("data-stimeo--flash-target");
+    document.body.append(host);
+    await flush();
+
+    expect(el.getAttribute("role")).toBeNull();
+    expect(el.hasAttribute("data-flash-state")).toBe(false);
+    expect(el.hasAttribute("data-stimeo--flash-shown")).toBe(false);
+    expect(announces).toHaveLength(1);
+  });
+
+  it("keeps a page write to a message's role when the message leaves", async () => {
+    await mount(region(message("notice")));
+    const el = query<HTMLElement>("[data-stimeo--flash-target='message']");
+    expect(el.getAttribute("role")).toBe("status");
+    el.setAttribute("role", "alert");
+    el.removeAttribute("data-stimeo--flash-target");
+    await flush();
+
+    expect(el.getAttribute("role")).toBe("alert");
+  });
+
   for (const origin of ["root", "message"] as const) {
     it.each([
       ["notice", "status"],
@@ -193,6 +266,7 @@ describe("FlashController", () => {
     first.remove();
     await flush();
     instance.connect();
+    expect(first.getAttribute("role")).toBeNull();
     regionEl().append(first);
     await flush();
     instance.maxValue = 1;
@@ -219,6 +293,7 @@ describe("FlashController", () => {
     instance.disconnect();
     first.remove();
     instance.messageTargetDisconnected(first);
+    expect(first.getAttribute("role")).toBe("status");
     regionEl().append(first);
     instance.connect();
     instance.maxValue = 1;
@@ -547,7 +622,7 @@ describe("FlashController", () => {
     // Taken on, then moved by the page out of the region: it is the page's now.
     const moved = regionEl().firstElementChild as HTMLElement;
     root().append(moved);
-    await flush();
+    expect(moved.hasAttribute("data-stimeo--flash-shown")).toBe(true);
     const reports = removalsOnDocument();
 
     await restore();
@@ -2736,8 +2811,7 @@ describe("FlashController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // The live region must actually announce the flash, not just carry the right
-  // attributes: freeze the role + message in spoken order.
+  // The simulated speech includes the status role and message in order.
   it("announces a notice flash through its status live region", async () => {
     vi.useRealTimers();
     document.body.innerHTML = region(

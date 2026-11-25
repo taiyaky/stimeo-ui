@@ -120,6 +120,31 @@ describe("ReadMoreController", () => {
     expect(trigger().hidden).toBe(true);
   });
 
+  it.each(["markers", "identifier"])(
+    "returns disclosure attributes on %s removal",
+    async (kind) => {
+      await start(true);
+      const text = content();
+      const button = trigger();
+      button.click();
+      expect(text.getAttribute("data-state")).toBe("expanded");
+      expect(button.getAttribute("aria-expanded")).toBe("true");
+      expect(button.hidden).toBe(false);
+
+      if (kind === "markers") {
+        text.removeAttribute("data-stimeo--read-more-target");
+        button.removeAttribute("data-stimeo--read-more-target");
+      } else {
+        query("[data-controller='stimeo--read-more']").removeAttribute("data-controller");
+      }
+      await tick();
+
+      expect(text.getAttribute("data-state")).toBe("collapsed");
+      expect(button.getAttribute("aria-expanded")).toBe("false");
+      expect(button.hidden).toBe(true);
+    },
+  );
+
   it("expands and collapses, syncing aria-expanded and data-state", async () => {
     await start(true);
     trigger().click();
@@ -230,6 +255,21 @@ describe("ReadMoreController", () => {
     expect(button.hidden).toBe(false);
     expect(document.activeElement).toBe(button);
 
+    button.blur();
+    expect(button.hidden).toBe(true);
+  });
+
+  it("reveals a still-focused trigger before deferring its hide", async () => {
+    await start(true);
+    const button = trigger();
+    button.focus();
+    button.hidden = true;
+    expect(document.activeElement).toBe(button);
+
+    stubOverflow(content(), false);
+    window.dispatchEvent(new Event("resize"));
+
+    expect(button.hidden).toBe(false);
     button.blur();
     expect(button.hidden).toBe(true);
   });
@@ -511,8 +551,7 @@ describe("ReadMoreController", () => {
     await start(true);
     const leaving = content();
     leaving.remove();
-
-    expect(() => controller().contentTargetDisconnected()).not.toThrow();
+    await tick();
 
     // Nothing is observed any more: the detached text and a resize leave the trigger alone.
     stubOverflow(leaving, false);

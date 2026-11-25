@@ -20,6 +20,7 @@ export const ANNOUNCER_IDENTIFIER = "stimeo--announcer";
 export const ANNOUNCING_CONTROLLERS: readonly string[] = [
   "stimeo--auto-submit",
   "stimeo--bulk-select",
+  "stimeo--calendar",
   "stimeo--character-counter",
   "stimeo--clipboard",
   "stimeo--countdown",

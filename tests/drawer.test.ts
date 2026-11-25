@@ -85,6 +85,13 @@ describe("DrawerController", () => {
     document.querySelector<HTMLElement>("[data-stimeo--drawer-target='panel']") as HTMLElement;
   const overlay = () =>
     document.querySelector<HTMLElement>("[data-stimeo--drawer-target='overlay']") as HTMLElement;
+  const drawerController = () => {
+    const root = trigger().parentElement;
+    if (!root) throw new Error("drawer root not found");
+    const instance = application.getControllerForElementAndIdentifier(root, "stimeo--drawer");
+    if (!(instance instanceof DrawerController)) throw new Error("drawer controller not found");
+    return instance;
+  };
 
   it("starts closed with data-state='closed' and hidden", () => {
     expect(panel().hidden).toBe(true);
@@ -151,6 +158,28 @@ describe("DrawerController", () => {
     controller.connect();
 
     expect(panel().getAttribute("data-placement")).toBe("right");
+  });
+
+  it("keeps a drawer closed when the page closes its panel while detached", async () => {
+    const instance = drawerController();
+    const root = instance.element;
+    const currentPanel = panel();
+    instance.open();
+
+    root.remove();
+    await tick();
+    currentPanel.setAttribute("data-state", "closed");
+    currentPanel.hidden = true;
+    root.setAttribute("data-stimeo--drawer-open-value", "false");
+    document.body.append(root);
+    await tick();
+
+    expect(drawerController()).toBe(instance);
+    expect(currentPanel.getAttribute("data-state")).toBe("closed");
+    expect(currentPanel.hidden).toBe(true);
+    expect(overlay().hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
+    expect(document.querySelector("[inert]")).toBeNull();
   });
 
   it("opens: reveals the panel, syncs data-state, and locks scroll", () => {
@@ -407,7 +436,140 @@ describe("DrawerController", () => {
     expect(document.activeElement).toBe(replacement.querySelector("#inside"));
   });
 
-  it("releases the modal side effects when the open panel is removed", async () => {
+  it("keeps the open state and modal lifecycle when a closed panel copy replaces the first panel", async () => {
+    trigger().focus();
+    trigger().click();
+    const events: string[] = [];
+    const root = trigger().parentElement as HTMLElement;
+    root.addEventListener("stimeo--drawer:open", () => events.push("open"));
+    root.addEventListener("stimeo--drawer:close", () => events.push("close"));
+    const original = panel();
+    const replacement = original.cloneNode(true) as HTMLElement;
+    replacement.setAttribute("data-state", "closed");
+    replacement.hidden = true;
+
+    original.replaceWith(replacement);
+    await tick();
+
+    expect(panel()).toBe(replacement);
+    expect(replacement.getAttribute("data-state")).toBe("open");
+    expect(replacement.hidden).toBe(false);
+    expect(overlay().getAttribute("data-state")).toBe("open");
+    expect(overlay().hidden).toBe(false);
+    expect(drawerController().openValue).toBe(true);
+    expect(document.body.style.overflow).toBe("hidden");
+    expect((document.getElementById("background") as HTMLElement).inert).toBe(true);
+    expect(document.activeElement).toBe(replacement.querySelector("#inside"));
+    expect(events).toEqual([]);
+
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
+    expect(document.activeElement).toBe(trigger());
+    expect(events).toEqual(["close"]);
+  });
+
+  it("keeps the open state when open runs in the same task as a closed panel replacement", async () => {
+    trigger().focus();
+    trigger().click();
+    const events: string[] = [];
+    const root = trigger().parentElement as HTMLElement;
+    root.addEventListener("stimeo--drawer:open", () => events.push("open"));
+    root.addEventListener("stimeo--drawer:close", () => events.push("close"));
+    const original = panel();
+    const replacement = original.cloneNode(true) as HTMLElement;
+    replacement.setAttribute("data-state", "closed");
+    replacement.hidden = true;
+
+    original.replaceWith(replacement);
+    drawerController().open();
+    expect(replacement.hidden).toBe(false);
+    expect(document.activeElement).toBe(replacement.querySelector("#inside"));
+    await tick();
+
+    expect(replacement.getAttribute("data-state")).toBe("open");
+    expect(replacement.hidden).toBe(false);
+    expect(drawerController().openValue).toBe(true);
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(events).toEqual([]);
+  });
+
+  it.each(["settled", "same task"])(
+    "keeps the adopted panel shown through its exit when close follows a %s replacement",
+    async (timing) => {
+      trigger().focus();
+      drawerController().open();
+      const current = panel();
+      const successor = current.cloneNode(true) as HTMLElement;
+      successor.setAttribute("data-state", "closed");
+      successor.hidden = true;
+      current.replaceWith(successor);
+      if (timing === "settled") await tick();
+      vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
+      vi.useFakeTimers();
+      const frames: Array<HTMLElement["hidden"]> = [];
+      overlay().parentElement?.addEventListener("stimeo--drawer:close", () => {
+        frames.push(successor.hidden);
+      });
+
+      drawerController().close();
+      expect(frames).toEqual([false]);
+      expect(successor.hidden).toBe(false);
+      expect(document.body.style.overflow).toBe("hidden");
+      vi.advanceTimersByTime(250);
+      expect(successor.hidden).toBe(true);
+      expect(document.body.style.overflow).toBe("");
+      expect(document.activeElement).toBe(trigger());
+    },
+  );
+
+  it("keeps the open modal through an empty panel interval and adopts its first replacement", async () => {
+    trigger().focus();
+    trigger().click();
+    const events: string[] = [];
+    const root = trigger().parentElement as HTMLElement;
+    root.addEventListener("stimeo--drawer:open", () => events.push("open"));
+    root.addEventListener("stimeo--drawer:close", () => events.push("close"));
+    const upper = openUpperModal();
+    const original = panel();
+    const replacement = original.cloneNode(true) as HTMLElement;
+    replacement.setAttribute("data-state", "closed");
+    replacement.hidden = true;
+
+    original.remove();
+    await tick();
+    drawerController().open();
+
+    expect(overlay().getAttribute("data-state")).toBe("open");
+    expect(overlay().hidden).toBe(false);
+    expect(upper.operable()).toBe(true);
+    expect((document.getElementById("background") as HTMLElement).inert).toBe(true);
+
+    keyboardPress(upper.first, "Escape");
+    expect(upper.escapes()).toBe(1);
+    expect(document.activeElement).toBe(overlay());
+    expect(document.body.style.overflow).toBe("hidden");
+    expect((document.getElementById("background") as HTMLElement).inert).toBe(true);
+
+    overlay().append(replacement);
+    await tick();
+
+    expect(replacement.getAttribute("data-state")).toBe("open");
+    expect(replacement.hidden).toBe(false);
+    expect(overlay().getAttribute("data-state")).toBe("open");
+    expect(overlay().hidden).toBe(false);
+    expect(drawerController().openValue).toBe(true);
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(document.activeElement).toBe(replacement.querySelector("#inside"));
+    expect(events).toEqual([]);
+
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
+    expect(panel().hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger());
+    expect(document.body.style.overflow).toBe("");
+    expect((document.getElementById("background") as HTMLElement).inert).toBe(false);
+    expect(events).toEqual(["close"]);
+  });
+
+  it("keeps the open modal state while the panel is absent and closes without a panel", async () => {
     const background = document.getElementById("background") as HTMLElement;
     trigger().focus();
     trigger().click();
@@ -416,23 +578,35 @@ describe("DrawerController", () => {
     panel().remove();
     await tick();
 
+    expect(overlay().getAttribute("data-state")).toBe("open");
+    expect(overlay().hidden).toBe(false);
+    expect(drawerController().openValue).toBe(true);
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(background.inert).toBe(true);
+
+    drawerController().close();
+
+    expect(overlay().getAttribute("data-state")).toBe("closed");
+    expect(overlay().hidden).toBe(true);
+    expect(drawerController().openValue).toBe(false);
     expect(document.body.style.overflow).toBe("");
     expect(background.inert).toBe(false);
     expect(document.activeElement).toBe(trigger());
   });
 
-  it("closes the overlay together with a panel removed while open", async () => {
+  it("keeps the overlay open together with a panel removed while open", async () => {
     trigger().click();
     expect(overlay().getAttribute("data-state")).toBe("open");
 
     panel().remove();
     await tick();
 
-    expect(overlay().getAttribute("data-state")).toBe("closed");
-    expect(overlay().hidden).toBe(true);
+    expect(overlay().getAttribute("data-state")).toBe("open");
+    expect(overlay().hidden).toBe(false);
+    expect(document.body.style.overflow).toBe("hidden");
   });
 
-  it("keeps a panel that left while open closed when it comes back", async () => {
+  it("reopens the controller state on a panel that returns", async () => {
     trigger().click();
     const removed = panel();
     removed.remove();
@@ -442,9 +616,9 @@ describe("DrawerController", () => {
     await tick();
 
     expect(panel()).toBe(removed);
-    expect(removed.getAttribute("data-state")).toBe("closed");
-    expect(removed.hidden).toBe(true);
-    expect(document.body.style.overflow).toBe("");
+    expect(removed.getAttribute("data-state")).toBe("open");
+    expect(removed.hidden).toBe(false);
+    expect(document.body.style.overflow).toBe("hidden");
   });
 
   it("drops the close-transition wait when the closing panel is removed", async () => {
@@ -453,7 +627,13 @@ describe("DrawerController", () => {
     trigger().click();
     document.getElementById("close")?.click(); // exit transition pending
     const closing = panel();
+    const cover = overlay();
+    const background = document.getElementById("background") as HTMLElement;
     const released = vi.spyOn(closing, "removeEventListener");
+    expect(cover.hidden).toBe(false);
+    expect(background.inert).toBe(true);
+    expect(document.body.style.overflow).toBe("hidden");
+    cover.setAttribute("data-state", "open");
 
     closing.remove();
     await vi.advanceTimersByTimeAsync(0);
@@ -462,9 +642,204 @@ describe("DrawerController", () => {
       expect.arrayContaining(["transitionend", "transitioncancel"]),
     );
     expect(vi.getTimerCount()).toBe(0);
+    expect(cover.getAttribute("data-state")).toBe("closed");
+    expect(cover.hidden).toBe(true);
+    expect(background.inert).toBe(false);
+    expect(document.body.style.overflow).toBe("");
   });
 
-  it("keeps an open replacement that arrives before the closing panel leaves on screen", async () => {
+  it("moves the modal boundary and focus to the remaining overlay after a panel leaves", async () => {
+    const cover = overlay();
+    const fallback = document.createElement("button");
+    fallback.type = "button";
+    fallback.textContent = "Fallback";
+    cover.append(fallback);
+    trigger().focus();
+    drawerController().open();
+    expect(fallback.inert).toBe(true);
+
+    panel().remove();
+    await tick();
+
+    expect(fallback.inert).toBe(false);
+    expect(document.activeElement).toBe(fallback);
+    expect(cover.hidden).toBe(false);
+    expect(document.body.style.overflow).toBe("hidden");
+  });
+
+  it("does not open when neither a panel nor an overlay remains", async () => {
+    const drawer = drawerController();
+    overlay().remove();
+    await tick();
+    trigger().focus();
+    const events = captureStateEvents("stimeo--drawer");
+    try {
+      drawer.open();
+
+      expect(drawer.openValue).toBe(false);
+      expect(events.names()).toEqual([]);
+      expect(document.body.style.overflow).toBe("");
+      expect(document.activeElement).toBe(trigger());
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("adopts a panel installed by an open listener before focusing it", () => {
+    const drawer = drawerController();
+    const previous = panel();
+    const successor = previous.cloneNode(true) as HTMLElement;
+    drawer.element.addEventListener("stimeo--drawer:open", () => previous.replaceWith(successor), {
+      once: true,
+    });
+
+    drawer.open();
+
+    expect(successor.getAttribute("data-state")).toBe("open");
+    expect(successor.hidden).toBe(false);
+    expect(document.activeElement).toBe(successor.querySelector("#inside"));
+  });
+
+  it("releases the modal if a replacement's initial focus closes the drawer", () => {
+    const drawer = drawerController();
+    const previous = panel();
+    const successor = previous.cloneNode(true) as HTMLElement;
+    successor.querySelector("#inside")?.addEventListener("focus", () => drawer.close(), {
+      once: true,
+    });
+    drawer.element.addEventListener("stimeo--drawer:open", () => previous.replaceWith(successor), {
+      once: true,
+    });
+    trigger().focus();
+
+    drawer.open();
+
+    expect(successor.hidden).toBe(true);
+    expect(overlay().hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
+    expect(document.getElementById("background")?.inert).toBe(false);
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("reports one close when focusing a replacement while closing causes a close", () => {
+    const drawer = drawerController();
+    drawer.open();
+    const previous = panel();
+    const successor = previous.cloneNode(true) as HTMLElement;
+    previous.before(successor);
+    successor.querySelector("#inside")?.addEventListener("focus", () => drawer.close(), {
+      once: true,
+    });
+    const events = captureStateEvents("stimeo--drawer", ["close"]);
+    try {
+      drawer.close();
+
+      expect(events.names()).toEqual(["close"]);
+      expect(successor.hidden).toBe(true);
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("cancels the exit wait if a close listener starts another exit and removes the panel", () => {
+    vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
+    vi.useFakeTimers();
+    const drawer = drawerController();
+    drawer.open();
+    const leaving = panel();
+    const restart = () => {
+      drawer.element.removeEventListener("stimeo--drawer:close", restart);
+      drawer.open();
+      drawer.close();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      leaving.remove();
+    };
+    drawer.element.addEventListener("stimeo--drawer:close", restart);
+
+    drawer.close();
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(overlay().hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
+  });
+
+  it("adopts the first panel in the same task while keeping only that panel open", () => {
+    const drawer = drawerController();
+    drawer.open();
+    const previous = panel();
+    const successor = previous.cloneNode(true) as HTMLElement;
+    successor.setAttribute("data-state", "closed");
+    successor.hidden = true;
+    previous.before(successor);
+
+    drawer.open();
+
+    expect(previous.getAttribute("data-state")).toBe("closed");
+    expect(previous.hidden).toBe(true);
+    expect(successor.getAttribute("data-state")).toBe("open");
+    expect(successor.hidden).toBe(false);
+  });
+
+  it("uses a newly present visible panel for Tab before target callbacks run", async () => {
+    const previous = panel();
+    const cover = overlay();
+    const outsidePanel = document.createElement("button");
+    outsidePanel.type = "button";
+    outsidePanel.textContent = "Overlay control";
+    cover.append(outsidePanel);
+    previous.remove();
+    await tick();
+    drawerController().open();
+    expect(document.activeElement).toBe(outsidePanel);
+
+    previous.hidden = false;
+    cover.prepend(previous);
+    const first = previous.querySelector<HTMLButtonElement>("#inside");
+    const last = previous.querySelector<HTMLButtonElement>("#close");
+    if (!first || !last) throw new Error("Missing drawer fixture buttons");
+
+    const event = keyboardPress(last, "Tab");
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+  });
+
+  it("keeps the drawer root usable when both open surfaces leave", async () => {
+    const opener = trigger();
+    const background = document.getElementById("background") as HTMLElement;
+    opener.focus();
+    drawerController().open();
+    expect(opener.inert).toBe(true);
+    overlay().remove();
+    await tick();
+
+    expect(opener.inert).toBe(false);
+    expect(background.inert).toBe(true);
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(keyboardPress(opener, "Escape").defaultPrevented).toBe(true);
+    expect(background.inert).toBe(false);
+    expect(document.body.style.overflow).toBe("");
+  });
+
+  it("reopens at the overlay while waiting for a replacement panel", async () => {
+    trigger().focus();
+    const previous = panel();
+    previous.remove();
+    await tick();
+
+    drawerController().open();
+    expect(overlay().getAttribute("data-state")).toBe("open");
+    expect(overlay().hidden).toBe(false);
+    expect(document.activeElement).toBe(overlay());
+    overlay().append(previous);
+    await tick();
+
+    expect(previous.hidden).toBe(false);
+    expect(document.activeElement).toBe(previous.querySelector("#inside"));
+    drawerController().close();
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("keeps the controller closed when an open copy replaces a closing panel", async () => {
     vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
     vi.useFakeTimers();
     const background = document.getElementById("background") as HTMLElement;
@@ -472,23 +847,29 @@ describe("DrawerController", () => {
     trigger().click();
     document.getElementById("close")?.click(); // exit transition pending
     const closing = panel();
+    const cover = overlay();
+    cover.setAttribute("data-state", "open");
     const replacement = closing.cloneNode(true) as HTMLElement;
     replacement.setAttribute("data-state", "open");
     closing.before(replacement);
     closing.remove();
     await vi.advanceTimersByTimeAsync(0);
     expect(panel()).toBe(replacement);
-    expect(overlay().hidden).toBe(false);
+    expect(replacement.getAttribute("data-state")).toBe("closed");
+    expect(replacement.hidden).toBe(true);
+    expect(cover.getAttribute("data-state")).toBe("closed");
+    expect(cover.hidden).toBe(true);
+    closing.hidden = false;
 
-    // The overtaken close would have settled by now.
     vi.advanceTimersByTime(250);
 
-    expect(overlay().hidden).toBe(false);
-    expect(document.body.style.overflow).toBe("hidden");
-    expect(background.inert).toBe(true);
+    expect(closing.hidden).toBe(false);
+    expect(cover.hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
+    expect(background.inert).toBe(false);
   });
 
-  it("opens the overlay with a replacement panel that arrives open", async () => {
+  it("keeps a replacement closed when it arrives open into a closed drawer", async () => {
     expect(overlay().getAttribute("data-state")).toBe("closed");
     const replacement = panel().cloneNode(true) as HTMLElement;
     replacement.setAttribute("data-state", "open");
@@ -498,13 +879,19 @@ describe("DrawerController", () => {
     await tick();
 
     expect(panel()).toBe(replacement);
-    expect(overlay().getAttribute("data-state")).toBe("open");
-    expect(overlay().hidden).toBe(false);
+    expect(replacement.getAttribute("data-state")).toBe("closed");
+    expect(replacement.hidden).toBe(true);
+    expect(overlay().getAttribute("data-state")).toBe("closed");
+    expect(overlay().hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
   });
 
-  it("closes the overlay with a closed replacement that arrives before the open panel leaves", async () => {
+  it("keeps an open drawer when a closed copy replaces its panel in one task", async () => {
     trigger().click();
     const open = panel();
+    const cover = overlay();
+    cover.setAttribute("data-state", "closed");
+    cover.hidden = true;
     const replacement = open.cloneNode(true) as HTMLElement;
     replacement.setAttribute("data-state", "closed");
     replacement.hidden = true;
@@ -514,8 +901,11 @@ describe("DrawerController", () => {
     await tick();
 
     expect(panel()).toBe(replacement);
-    expect(overlay().getAttribute("data-state")).toBe("closed");
-    expect(overlay().hidden).toBe(true);
+    expect(replacement.getAttribute("data-state")).toBe("open");
+    expect(replacement.hidden).toBe(false);
+    expect(overlay().getAttribute("data-state")).toBe("open");
+    expect(overlay().hidden).toBe(false);
+    expect(document.body.style.overflow).toBe("hidden");
   });
 
   it.each(TARGET_SWAPS)(
@@ -855,14 +1245,25 @@ describe("DrawerController", () => {
       expect(panel().hidden).toBe(false);
     });
 
-    it("hands no remaining panel the modal once the close handler has disconnected it", () => {
+    it("releases the modal and schedules no hide when the close handler disconnects it", () => {
+      vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
+      vi.useFakeTimers();
       const instance = controller();
       instance.open();
-      root().addEventListener("stimeo--drawer:close", () => instance.disconnect());
-      // The close goes on after its handler returns and keeps the closing panel for the
-      // exit transition, so that panel leaving afterwards reaches the departure path.
-      instance.close();
       const leaving = panel();
+      const focused = leaving.querySelector("#inside") as HTMLElement;
+      expect(document.activeElement).toBe(focused);
+      expect(document.body.style.overflow).toBe("hidden");
+      root().addEventListener("stimeo--drawer:close", () => instance.disconnect());
+
+      instance.close();
+      expect(document.body.style.overflow).toBe("");
+      expect((document.getElementById("background") as HTMLElement).inert).toBe(false);
+      expect(document.activeElement).toBe(focused);
+      expect(keyboardPress(focused, "Tab").defaultPrevented).toBe(false);
+      expect(leaving.hidden).toBe(false);
+      vi.advanceTimersByTime(250);
+      expect(leaving.hidden).toBe(false);
       const remaining = leaving.cloneNode(true) as HTMLElement;
       for (const node of Array.from(remaining.querySelectorAll<HTMLElement>("[id]"))) {
         node.removeAttribute("id");
@@ -880,15 +1281,13 @@ describe("DrawerController", () => {
       expect((document.getElementById("background") as HTMLElement).inert).toBe(false);
     });
 
-    it("releases the modal the open handler's disconnect left once the closing panel leaves", () => {
+    it("does not activate the trap when an open subscriber disconnects before focus moves", () => {
       const instance = controller();
       root().addEventListener("stimeo--drawer:open", () => instance.disconnect(), { once: true });
       instance.open();
-      vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
-      keyboardPress(document.activeElement as HTMLElement, "Escape");
-      // The open went on after its handler disconnected the controller, so the modal is held
-      // through the exit transition.
-      expect(document.body.style.overflow).toBe("hidden");
+      const dismissal = keyboardPress(document.body, "Escape");
+      expect(dismissal.defaultPrevented).toBe(false);
+      expect(document.body.style.overflow).toBe("");
       const leaving = panel();
       const remaining = leaving.cloneNode(true) as HTMLElement;
       for (const node of Array.from(remaining.querySelectorAll<HTMLElement>("[id]"))) {
@@ -1148,7 +1547,7 @@ describe("DrawerController", () => {
       expect(document.activeElement?.id).toBe("ahead-inside");
     });
 
-    it("gives a panel left in the page without its target token its own values back, and closes", async () => {
+    it("returns a panel that loses its target token while keeping the open modal", async () => {
       await remount(BARE);
       trigger().focus();
       controller().open();
@@ -1157,10 +1556,10 @@ describe("DrawerController", () => {
       await tick();
 
       expect(stateOf(departed)).toEqual([null, false, null]);
-      expect(overlay().getAttribute("data-state")).toBe("closed");
-      expect(overlay().hidden).toBe(true);
-      expect(document.body.style.overflow).toBe("");
-      expect(document.activeElement).toBe(trigger());
+      expect(overlay().getAttribute("data-state")).toBe("open");
+      expect(overlay().hidden).toBe(false);
+      expect(document.body.style.overflow).toBe("hidden");
+      expect((document.getElementById("background") as HTMLElement).inert).toBe(true);
     });
 
     it("gives a closed panel that loses its target token the visibility it was authored with", async () => {
@@ -1173,16 +1572,17 @@ describe("DrawerController", () => {
       expect(stateOf(departed)).toEqual([null, false, null]);
     });
 
-    it("reveals a replacement panel that arrives open but hidden", async () => {
+    it("keeps a replacement closed when it arrives open into a closed drawer", async () => {
       const replacement = panel().cloneNode(true) as HTMLElement;
       replacement.setAttribute("data-state", "open");
       replacement.hidden = true;
       panel().replaceWith(replacement);
       await tick();
 
-      expect(replacement.hidden).toBe(false);
-      expect(overlay().getAttribute("data-state")).toBe("open");
-      expect(document.body.style.overflow).toBe("hidden");
+      expect(replacement.getAttribute("data-state")).toBe("closed");
+      expect(replacement.hidden).toBe(true);
+      expect(overlay().getAttribute("data-state")).toBe("closed");
+      expect(document.body.style.overflow).toBe("");
     });
 
     it("gives the panel back its own values when the drawer loses its controller", async () => {
@@ -1204,7 +1604,8 @@ describe("DrawerController", () => {
       await tick();
 
       expect(departed.getAttribute("hidden")).toBe("until-found");
-      expect(document.body.style.overflow).toBe("");
+      expect(overlay().getAttribute("data-state")).toBe("open");
+      expect(document.body.style.overflow).toBe("hidden");
     });
 
     it("keeps what it wrote on a panel that leaves with the controller element", async () => {

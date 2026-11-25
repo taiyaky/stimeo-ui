@@ -4,9 +4,17 @@ import { AttributeLease } from "../utils/attribute_lease";
 import { DetachGate } from "../utils/detach_gate";
 import { matchingPart, writeLabel } from "../utils/element_part";
 import { ownerOf } from "../utils/event_owner";
-import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
+import {
+  canTakeFocus,
+  deepActiveElement,
+  flatTreeContains,
+  inheritsFieldsetDisabled,
+} from "../utils/focus_candidate";
+import { ListenerSet } from "../utils/listener_set";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
+import { TabindexLoan } from "../utils/tabindex_loan";
 import { TemplateRow } from "../utils/template_row";
 
 /** Why one file was turned away, in the order the checks run. */
@@ -113,6 +121,9 @@ interface RejectBatch {
  *   them back at once, and the drag and rejection hooks the morph took off with them.
  *   A preview taken out any other way comes back the same way: the remove button is
  *   what drops a file.
+ * - Only the first list owns removal. Every following list is inert, even while
+ *   empty, and keeps its authored contents. Promotion or departure returns the
+ *   authored inert value; focus leaves a demoted list before it becomes inert.
  * `reject` dispatches `{ file: File, reason: "type" | "size" | "duplicate" | "count" }`.
  * `change` and `reconcile` dispatch `{ files: File[] }`.
  *
@@ -217,8 +228,14 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     noun: "item template",
   });
   readonly #gate = new DetachGate();
+  /** Only the first list owns preview interaction; every following list is inert. */
+  readonly #listInert = new AttributeLease<HTMLElement>("inert", this.identifier);
+  readonly #listListeners = new ListenerSet();
+  readonly #listMorph = new MorphRenderWatcher(() => this.#settleLists());
+  readonly #focusLoan = new TabindexLoan("-1", this.identifier);
+  #currentList: HTMLElement | null = null;
   /**
-   * Watches every list this controller renders into, so previews a morph empties out
+   * Watches the first list this controller renders into, so previews a morph empties out
    * of the list in place come back at once, with the zone hooks the same morph took off.
    */
   readonly #listWatch = new MutationObserver((records) => {
@@ -246,6 +263,9 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     this.#connected = true;
     this.#rows.connect();
     if (!moved) this.#discardInherited();
+    this.#focusLoan.reclaim(this.element);
+    this.#listMorph.observe(this.element);
+    this.#settleLists();
   }
 
   /**
@@ -255,8 +275,11 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    */
   override disconnect(): void {
     this.#connected = false;
-    for (const list of this.listTargets) list.removeEventListener("click", this.#onItemClick);
+    this.#listListeners.dispose();
+    this.#currentList = null;
     this.#listWatch.disconnect();
+    this.#listMorph.disconnect();
+    this.#focusLoan.returnAll();
     this.#gate.disconnected(this, () => this.#teardown());
   }
 
@@ -289,26 +312,17 @@ export class FileDropzoneController extends Controller<HTMLElement> {
   }
 
   /**
-   * Binds removal on every list this controller renders into — the one present at
-   * connect and any Turbo puts in its place — watches it for previews taken out of it,
-   * and restores client-only previews into the list that is first, so a list waiting
-   * behind the current one stays empty. This is the only place the listener is
-   * attached, so the pair with {@link listTargetDisconnected} keeps it from outliving
-   * the element it is on; the watch ends with the connection.
-   *
-   * @stimeoListenerLifetime element each list is bound when it becomes a target and
-   *   unbound when it stops being one or the controller disconnects.
+   * Settles first-list ownership when another list arrives, preserving previews and
+   * leaving authored contents in every following list untouched and inert.
    */
-  listTargetConnected(list: HTMLElement): void {
-    list.addEventListener("click", this.#onItemClick);
-    this.#listWatch.observe(list, { childList: true });
-    this.#rehome();
+  listTargetConnected(): void {
+    if (this.#connected) this.#settleLists();
   }
 
   /** Releases the list that disconnected and moves the previews into the list that stays. */
   listTargetDisconnected(list: HTMLElement): void {
-    list.removeEventListener("click", this.#onItemClick);
-    if (this.#connected) this.#rehome();
+    if (!this.listTargets.includes(list)) this.#listInert.return(list);
+    if (this.#connected) this.#settleLists();
   }
 
   /** Mirrors the accepted set onto an input that arrives after connect. */
@@ -417,7 +431,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    *   the announcements it makes.
    */
   #addFiles(files: FileList): void {
-    this.#rehome();
+    this.#settleLists();
     this.#invalid = false;
     const rejected = new Map<RejectReason, RejectBatch>();
     const turnedAway: Array<{ file: File; reason: RejectReason }> = [];
@@ -614,9 +628,51 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    */
   #rehome(): void {
     if (!this.hasListTarget) return;
+    const focused = deepActiveElement(this.element.ownerDocument);
+    const restore = this.#entries.some((entry) => flatTreeContains(entry.item, focused));
     for (const entry of this.#entries) {
       if (!this.listTarget.contains(entry.item)) this.listTarget.appendChild(entry.item);
     }
+    if (restore && focused instanceof HTMLElement) {
+      if (canTakeFocus(focused)) focused.focus();
+      if (deepActiveElement(this.element.ownerDocument) !== focused) this.#rescueListFocus();
+    }
+  }
+
+  /** Returns the first list's lease, moves previews, then disables every following list. */
+  #settleLists(): void {
+    const [current, ...behind] = this.listTargets;
+    if (current) this.#listInert.return(current);
+    if (this.#currentList !== (current ?? null)) {
+      this.#listListeners.dispose();
+      this.#listWatch.disconnect();
+      this.#currentList = current ?? null;
+      if (current) {
+        this.#listListeners.add(current, "click", this.#onItemClick);
+        this.#listWatch.observe(current, { childList: true });
+      }
+    }
+    this.#rehome();
+    for (const list of behind) {
+      if (flatTreeContains(list, deepActiveElement(this.element.ownerDocument)))
+        this.#rescueListFocus();
+      this.#listInert.write(list, "");
+    }
+  }
+
+  /** Keeps focus on the file field when authored contents become inactive. */
+  #rescueListFocus(): void {
+    const candidates = [
+      ...(this.hasTriggerTarget ? [this.triggerTarget] : []),
+      ...(this.hasInputTarget ? [this.inputTarget] : []),
+    ];
+    for (const candidate of candidates) {
+      if (!canTakeFocus(candidate)) continue;
+      candidate.focus();
+      if (deepActiveElement(this.element.ownerDocument) === candidate) return;
+    }
+    this.#focusLoan.lend(this.element);
+    this.element.focus();
   }
 
   /** Drops the drag-over state, whether the drag ended in a drop or left the zone. */
@@ -650,6 +706,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
 
   /** Releases the selection once the disconnect is known to be a real detach. */
   #teardown(): void {
+    this.#listInert.returnAll();
     this.#reset();
   }
 

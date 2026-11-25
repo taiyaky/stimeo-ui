@@ -6,14 +6,8 @@ import { captureFieldCommits } from "./helpers/field_commits";
 import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
-
-/**
- * Behavioral tests for {@link ToggleGroupController}: pressed-state ownership,
- * single/multiple selection, delegated activation, resilient roving focus,
- * retained-element reconciliation, and the `change` / `reconcile` notifications.
- */
 
 const action = `data-action="click->stimeo--toggle-group#toggle
   keydown->stimeo--toggle-group#onKeydown"`;
@@ -33,6 +27,11 @@ const group = (
 ) => `<div data-controller="stimeo--toggle-group" role="group" aria-label="Text style"
   ${mode ? `data-stimeo--toggle-group-mode-value="${mode}"` : ""}>${content}</div>`;
 
+/**
+ * Behavioral tests for {@link ToggleGroupController}: pressed-state ownership,
+ * single/multiple selection, delegated activation, resilient roving focus,
+ * retained-element reconciliation, and the `change` / `reconcile` notifications.
+ */
 describe("ToggleGroupController", () => {
   let application: Application | null = null;
 
@@ -68,6 +67,37 @@ describe("ToggleGroupController", () => {
   const pressed = (scope = root()) =>
     items(scope).map((candidate) => candidate.getAttribute("aria-pressed"));
   const tabindexes = (scope = root()) => items(scope).map((candidate) => candidate.tabIndex);
+
+  it("keeps pressed state boolean while establishing a target's Tab stop", async () => {
+    const invalid: string[] = [];
+    customElements.define(
+      "boolean-pressed-item",
+      class extends HTMLElement {
+        static observedAttributes = ["aria-pressed"];
+
+        attributeChangedCallback(
+          _name: string,
+          _before: string | null,
+          after: string | null,
+        ): void {
+          if (after === null || after === "true" || after === "false") return;
+          invalid.push(after);
+          this.removeAttribute("data-stimeo--toggle-group-target");
+        }
+      },
+    );
+    await start(
+      group(`
+      <boolean-pressed-item role="button" aria-pressed="false"
+        tabindex="7" data-stimeo--toggle-group-target="item">Choice</boolean-pressed-item>
+    `),
+    );
+
+    expect(invalid).toEqual([]);
+    const candidate = items()[0] as HTMLElement;
+    expect(candidate.getAttribute("aria-pressed")).toBe("false");
+    expect(candidate.tabIndex).toBe(0);
+  });
 
   it("releases a queued author default before a requested morph repair", async () => {
     await start(
@@ -140,10 +170,12 @@ describe("ToggleGroupController", () => {
       data-stimeo--toggle-group-target="item">Bare</reactive-pressed-ownership>`),
     );
     const candidate = items()[1] as HTMLElement;
+    const pressedDuringReport: Array<string | null> = [];
     root().addEventListener(
       "stimeo--toggle-group:reconcile",
       () => {
         controller().toggle(candidate);
+        pressedDuringReport.push(candidate.getAttribute("aria-pressed"));
         candidate.setAttribute("contenteditable", "true");
         controller().disconnect();
         controller().connect();
@@ -155,7 +187,8 @@ describe("ToggleGroupController", () => {
     items()[0]?.setAttribute("aria-pressed", "false");
     await tick();
     expect(reacted).toBe(true);
-    expect(candidate.getAttribute("aria-pressed")).toBe("true");
+    expect(pressedDuringReport).toEqual(["true"]);
+    expect(candidate.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("excludes its generated children from repair while observing author replacements", async () => {
@@ -249,9 +282,9 @@ describe("ToggleGroupController", () => {
     expect(tabindexes()).toEqual([-1, -1, 0]);
 
     const retained = root();
-    retained.removeAttribute("data-controller");
+    retained.remove();
     await tick();
-    retained.setAttribute("data-controller", "stimeo--toggle-group");
+    document.body.append(retained);
     await tick();
 
     expect(tabindexes()).toEqual([-1, -1, 0]);
@@ -267,11 +300,10 @@ describe("ToggleGroupController", () => {
     expect(stale.tabIndex).toBe(0);
     expect(stale.getAttribute("aria-pressed")).toBe("false");
 
-    retained.removeAttribute("data-controller");
-    await tick();
+    const instance = controller();
+    instance.context.disconnect();
     stale.remove();
-    retained.setAttribute("data-controller", "stimeo--toggle-group");
-    await tick();
+    instance.context.connect();
 
     expect(stale.getAttribute("tabindex")).toBe("4");
     expect(stale.hasAttribute("aria-pressed")).toBe(false);
@@ -455,7 +487,7 @@ describe("ToggleGroupController", () => {
     }
   });
 
-  it("syncs the roving entry point to pointer or programmatic focus", async () => {
+  it("syncs the roving entry point when an item gains programmatic focus", async () => {
     await start();
     items()[2]?.focus();
     expect(tabindexes()).toEqual([-1, -1, 0]);
@@ -2129,5 +2161,234 @@ describe("ToggleGroupController target API", () => {
     await tick();
     expect(seen).toEqual(["native:b", "native:a", "api:a"]);
     expect(submitted()).toBe("a");
+  });
+});
+
+describe("ToggleGroupController attribute leases", () => {
+  let application: Application | undefined;
+  const identifier = "stimeo--toggle-group";
+  const targetAttribute = "data-stimeo--toggle-group-target";
+  const stateAttribute = "aria-pressed";
+  const markup = (
+    authored: string | null,
+    authoredTabindex: string | null,
+  ) => `<div id="lease-group"
+    data-controller="stimeo--toggle-group" role="group" aria-label="Choices">
+    <button id="lease-first" type="button" role="button" data-value="first"
+      ${authoredTabindex === null ? "" : `tabindex="${authoredTabindex}"`}
+      ${authored === null ? "" : `aria-pressed="${authored}"`}
+      data-stimeo--toggle-group-target="item">First</button>
+    <button id="lease-second" type="button" role="button" data-value="second" tabindex="-1"
+      data-stimeo--toggle-group-target="item">Second</button>
+    <span data-stimeo--toggle-group-target="fields"></span>
+  </div>`;
+  const requireElement = (id: string): HTMLElement => {
+    const found = document.getElementById(id);
+    if (!found) throw new Error(`Missing lease fixture ${id}`);
+    return found;
+  };
+  const mount = async (
+    authored: string | null,
+    authoredTabindex: string | null = "7",
+  ): Promise<void> => {
+    document.body.innerHTML = markup(authored, authoredTabindex);
+    application = Application.start();
+    application.register(identifier, ToggleGroupController);
+    await tick();
+  };
+  afterEach(() => {
+    if (application) disconnectAndStopApplication(application);
+    application = undefined;
+    document.body.innerHTML = "";
+  });
+
+  describe.each(["live", "restored"] as const)("on a %s page", (page) => {
+    it.each(["token", "identifier", "detach"] as const)(
+      "returns authored state and tab stops on %s departure",
+      async (departure) => {
+        await mount("false");
+        requireElement("lease-first").click();
+        await tick();
+        if (page === "restored") {
+          if (!application) throw new Error("Lease application missing");
+          application = await restoreFromCache(application, (restored) =>
+            restored.register(identifier, ToggleGroupController),
+          );
+        }
+        const group = requireElement("lease-group");
+        const first = requireElement("lease-first");
+        expect(first.getAttribute(stateAttribute)).toBe("true");
+        expect(first.getAttribute("tabindex")).toBe("0");
+
+        if (departure === "token") first.removeAttribute(targetAttribute);
+        else if (departure === "identifier") group.removeAttribute("data-controller");
+        else first.remove();
+        await tick();
+
+        expect(first.getAttribute(stateAttribute)).toBe("false");
+        expect(first.getAttribute("tabindex")).toBe("7");
+        expect(first.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+      },
+    );
+  });
+
+  it("returns absent authored attributes after an identifier leaves", async () => {
+    await mount(null);
+    const group = requireElement("lease-group");
+    const first = requireElement("lease-first");
+    first.click();
+    await tick();
+    expect(first.getAttribute(stateAttribute)).toBe("true");
+    group.removeAttribute("data-controller");
+    await tick();
+    expect(first.getAttribute(stateAttribute)).toBeNull();
+    expect(first.getAttribute("tabindex")).toBe("7");
+  });
+
+  it("preserves the selection and attributes while the same target moves", async () => {
+    await mount(null);
+    const group = requireElement("lease-group");
+    const second = requireElement("lease-second");
+    second.click();
+    await tick();
+    const before = second.outerHTML;
+    const changes: Event[] = [];
+    group.addEventListener(`${identifier}:change`, (event) => changes.push(event));
+    group.addEventListener(`${identifier}:reconcile`, (event) => changes.push(event));
+    const writes: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => writes.push(...records));
+    observer.observe(second, { attributes: true, attributeFilter: [stateAttribute, "tabindex"] });
+    try {
+      group.prepend(second);
+      await tick();
+      writes.push(...observer.takeRecords());
+    } finally {
+      observer.disconnect();
+    }
+    expect(second.getAttribute(stateAttribute)).toBe("true");
+    expect(second.getAttribute("tabindex")).toBe("0");
+    expect(second.outerHTML).toBe(before);
+    expect(changes).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
+  it("retains state when the controller element leaves the document", async () => {
+    await mount(null);
+    const group = requireElement("lease-group");
+    const second = requireElement("lease-second");
+    second.click();
+    await tick();
+    group.remove();
+    await tick();
+    expect(second.getAttribute(stateAttribute)).toBe("true");
+    expect(second.getAttribute("tabindex")).toBe("0");
+    document.body.append(group);
+    await tick();
+    expect(second.getAttribute(stateAttribute)).toBe("true");
+    expect(second.getAttribute("tabindex")).toBe("0");
+  });
+
+  it.each(["live", "restored"] as const)(
+    "returns an authored selected state on a %s page",
+    async (page) => {
+      await mount("true");
+      requireElement("lease-first").click();
+      await tick();
+      if (page === "restored") {
+        if (!application) throw new Error("Lease application missing");
+        application = await restoreFromCache(application, (restored) =>
+          restored.register(identifier, ToggleGroupController),
+        );
+      }
+      const group = requireElement("lease-group");
+      const first = requireElement("lease-first");
+      expect(first.getAttribute(stateAttribute)).toBe("false");
+      group.removeAttribute("data-controller");
+      await tick();
+      expect(first.getAttribute(stateAttribute)).toBe("true");
+    },
+  );
+
+  it("returns an absent authored tab stop", async () => {
+    await mount(null, null);
+    const group = requireElement("lease-group");
+    const first = requireElement("lease-first");
+    first.click();
+    await tick();
+    expect(first.getAttribute("tabindex")).toBe("0");
+    group.removeAttribute("data-controller");
+    await tick();
+    expect(first.hasAttribute("tabindex")).toBe(false);
+    expect(first.hasAttribute(stateAttribute)).toBe(false);
+  });
+
+  it("returns a state authored while disconnected after a later controlled write", async () => {
+    await mount(null);
+    const group = requireElement("lease-group");
+    const first = requireElement("lease-first");
+    const retained = application?.getControllerForElementAndIdentifier(group, identifier);
+    expect(retained).toBeTruthy();
+    group.remove();
+    await tick();
+    first.setAttribute(stateAttribute, "true");
+    document.body.append(group);
+    await tick();
+    expect(application?.getControllerForElementAndIdentifier(group, identifier)).toBe(retained);
+    expect(first.getAttribute(stateAttribute)).toBe("true");
+    first.click();
+    await tick();
+    expect(first.getAttribute(stateAttribute)).toBe("false");
+    first.removeAttribute(targetAttribute);
+    await tick();
+
+    expect(first.getAttribute(stateAttribute)).toBe("true");
+    expect(first.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("adopts repeated authored values before a target token leaves in the same task", async () => {
+    await mount(null);
+    const first = requireElement("lease-first");
+    first.click();
+    await tick();
+    first.setAttribute(stateAttribute, "true");
+    first.setAttribute("tabindex", "0");
+    first.removeAttribute(targetAttribute);
+    await tick();
+
+    expect(first.getAttribute(stateAttribute)).toBe("true");
+    expect(first.getAttribute("tabindex")).toBe("0");
+    expect(first.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("returns a tab stop authored while disconnected after reconnect normalizes it", async () => {
+    await mount(null);
+    const group = requireElement("lease-group");
+    const first = requireElement("lease-first");
+    group.remove();
+    await tick();
+    first.setAttribute("tabindex", "9");
+    document.body.append(group);
+    await tick();
+    expect(first.getAttribute("tabindex")).toBe("0");
+    first.removeAttribute(targetAttribute);
+    await tick();
+
+    expect(first.getAttribute("tabindex")).toBe("9");
+    expect(first.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("adopts repeated authored values before the identifier leaves in the same task", async () => {
+    await mount(null);
+    const group = requireElement("lease-group");
+    const first = requireElement("lease-first");
+    first.click();
+    await tick();
+    first.setAttribute(stateAttribute, "true");
+    first.setAttribute("tabindex", "0");
+    group.removeAttribute("data-controller");
+    await tick();
+    expect(first.getAttribute(stateAttribute)).toBe("true");
+    expect(first.getAttribute("tabindex")).toBe("0");
+    expect(first.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
   });
 });

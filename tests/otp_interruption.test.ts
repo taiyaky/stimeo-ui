@@ -126,7 +126,7 @@ describe("OTP interrupted composition publication", () => {
     }
   }
 
-  it("uses the latest pattern for the residual and rollback, then drops other old digits before confirmation", async () => {
+  it("uses the latest pattern to reject both the interrupted draft and that slot's prior digit, retaining the other slots", async () => {
     const h = await mount("9");
     begin(h.last, "う");
     await h.patternTo("[1-4]");

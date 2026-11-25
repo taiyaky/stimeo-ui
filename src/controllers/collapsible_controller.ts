@@ -88,6 +88,8 @@ export class CollapsibleController extends Controller<HTMLElement> {
   #connected = false;
   /** Whether state moves are reported: set once `connect()` settled the baseline. */
   #reporting = false;
+  /** The active trigger that has already been synchronized with the current content. */
+  #syncedTrigger: HTMLElement | null = null;
 
   /**
    * Establishes the initial open/closed state without waiting for a close transition.
@@ -124,6 +126,7 @@ export class CollapsibleController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#reporting = false;
+    this.#syncedTrigger = null;
     this.#transition.cancel();
   }
 
@@ -150,6 +153,7 @@ export class CollapsibleController extends Controller<HTMLElement> {
    * no content target the trigger's own `aria-expanded` is the state.
    */
   #reconcileTrigger(trigger: HTMLElement): void {
+    if (this.hasTriggerTarget && this.triggerTarget === trigger) this.#syncedTrigger = trigger;
     if (this.hasContentTarget) {
       this.#expanded.write(
         trigger,
@@ -216,13 +220,14 @@ export class CollapsibleController extends Controller<HTMLElement> {
   }
 
   /**
-   * Whether the region is logically open. Read from `aria-expanded` (not the
-   * content's `hidden`) so a click *during* a close transition — when `hidden`
-   * is still deferred — correctly reopens instead of re-closing.
+   * Whether the region is logically open. A just-replaced trigger receives
+   * the retained content's state before its own `aria-expanded` is authoritative.
+   * Both state attributes settle before the deferred close transition.
    */
   get #isOpen(): boolean {
-    if (this.hasTriggerTarget) {
-      return this.triggerTarget.getAttribute("aria-expanded") === "true";
+    const trigger = this.hasTriggerTarget ? this.triggerTarget : null;
+    if (trigger && (trigger === this.#syncedTrigger || !this.hasContentTarget)) {
+      return trigger.getAttribute("aria-expanded") === "true";
     }
     return this.hasContentTarget && this.contentTarget.getAttribute("data-state") === "open";
   }
@@ -241,10 +246,12 @@ export class CollapsibleController extends Controller<HTMLElement> {
   #apply(open: boolean, waitForCloseTransition: boolean, reason: StateReason): void {
     const was = this.#isOpen;
     if (this.hasTriggerTarget) {
-      this.#expanded.write(this.triggerTarget, open ? "true" : "false");
+      const trigger = this.triggerTarget;
+      this.#syncedTrigger = trigger;
+      this.#expanded.write(trigger, open ? "true" : "false");
       // The label belongs to `aria-expanded`, so it moves with it rather than with
       // the content's `hidden`, which a close transition defers.
-      this.#labels.reflect(this.triggerTarget, open);
+      this.#labels.reflect(trigger, open);
     }
     if (this.hasContentTarget) {
       const content = this.contentTarget;

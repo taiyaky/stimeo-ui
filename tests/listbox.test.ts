@@ -4,15 +4,8 @@ import { ListboxController } from "../src/controllers/listbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
-
-/**
- * Behavioral tests for {@link ListboxController}: the APG select-only listbox —
- * open/close, `aria-activedescendant` roving with focus on the trigger,
- * typeahead, single selection (`aria-selected` + trigger label + hidden field),
- * focus restoration, outside-click/Escape/Tab dismissal, and the `change` event.
- */
 
 const markup = `
   <div data-controller="stimeo--listbox">
@@ -40,6 +33,12 @@ const markup = `
     <input type="hidden" data-stimeo--listbox-target="field" />
   </div>`;
 
+/**
+ * Behavioral tests for {@link ListboxController}: the APG select-only listbox —
+ * open/close, `aria-activedescendant` roving with focus on the trigger,
+ * typeahead, single selection (`aria-selected` + trigger label + hidden field),
+ * focus restoration, outside-click/Escape/Tab dismissal, and the `change` event.
+ */
 describe("ListboxController", () => {
   let application: Application;
 
@@ -340,15 +339,15 @@ describe("ListboxController", () => {
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("opens on a real mouse click and ignores keyboard-synthesized clicks", () => {
+  it("opens on a click with nonzero detail and ignores one with zero detail", () => {
     trigger().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 }));
-    expect(listEl().hidden).toBe(true); // detail 0 == keyboard activation, ignored
+    expect(listEl().hidden).toBe(true); // The zero-detail click models keyboard activation.
     trigger().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
     expect(listEl().hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("toggles shut on a second real mouse click", () => {
+  it("toggles shut on a second click with nonzero detail", () => {
     // `toggle` has to branch on the current state. A handler that only ever opens
     // still passes every other open-path case in this file.
     const click = () =>
@@ -1004,7 +1003,7 @@ describe("ListboxController", () => {
   });
 
   describe("an option added before the active one", () => {
-    it("keeps the active identity, so Enter commits what AT announced", async () => {
+    it("keeps the active identity so Enter commits the option referenced by aria-activedescendant", async () => {
       // The active option is a stable id, not a position index, so prepending an
       // option leaves `aria-activedescendant` and what Enter commits in agreement.
       // This pins the *addition* side of that identity.
@@ -1102,6 +1101,91 @@ describe("ListboxController", () => {
       expect(heard).toEqual([]);
     });
 
+    it.each(["toggle", "Escape", "ArrowDown"] as const)(
+      "handles %s with a settled, immediate or still absent replacement list",
+      async (action) => {
+        for (const timing of ["settled", "same task", "no target"]) {
+          instance().open();
+          const current = listEl();
+          const next = current.cloneNode(true) as HTMLElement;
+          next.hidden = true;
+          if (timing === "no target") current.remove();
+          else current.replaceWith(next);
+          if (timing !== "same task") await tick();
+          const remainsOpen = action === "ArrowDown";
+
+          if (action === "toggle") {
+            trigger().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+          } else {
+            expect(pressKey(trigger(), action).defaultPrevented, timing).toBe(
+              timing !== "no target" || action === "Escape",
+            );
+          }
+          expect(trigger().getAttribute("aria-expanded"), timing).toBe(String(remainsOpen));
+          if (timing === "no target") root().append(next);
+          else expect(next.hidden, timing).toBe(!remainsOpen);
+          await tick();
+          expect(next.hidden, timing).toBe(!remainsOpen);
+          if (!remainsOpen) expect(active(), timing).toBeNull();
+          else if (timing !== "no target") expect(active(), timing).toBe("opt-2");
+        }
+      },
+    );
+
+    it("keeps the active option suspended while only the list target marker is absent", async () => {
+      instance().open();
+      pressKey(trigger(), "ArrowDown");
+      expect(active()).toBe("opt-2");
+      const original = listEl();
+      const marker = "data-stimeo--listbox-target";
+
+      original.removeAttribute(marker);
+      await tick();
+
+      expect(active()).toBeNull();
+      expect(pressKey(trigger(), "Enter").defaultPrevented).toBe(false);
+      expect(field().value).toBe("");
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+
+      original.setAttribute(marker, "list");
+      await tick();
+      expect(active()).toBe("opt-2");
+    });
+
+    it("uses a page-opened list's live visibility to handle an outside click", () => {
+      expect(listEl().hidden).toBe(true);
+      listEl().hidden = false;
+
+      document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      expect(listEl().hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps a closed list hidden when open is requested without a trigger", async () => {
+      const listbox = instance();
+      trigger().remove();
+      await tick();
+
+      listbox.open();
+
+      expect(listEl().hidden).toBe(true);
+    });
+
+    it("preserves an opening key pressed before the first replacement list arrives", async () => {
+      const original = listEl();
+      const next = original.cloneNode(true) as HTMLElement;
+      original.remove();
+      await tick();
+      expect(pressKey(trigger(), "ArrowDown").defaultPrevented).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      root().append(next);
+      await tick();
+
+      expect(next.hidden).toBe(false);
+      expect(active()).toBe("opt-1");
+    });
+
     it("carries the open state onto a list that stays after an earlier one leaves", async () => {
       const original = listEl();
       const successor = original.cloneNode(true) as HTMLElement;
@@ -1157,7 +1241,7 @@ describe("ListboxController", () => {
       expect(late.getAttribute("aria-activedescendant")).toBe("opt-1");
     });
 
-    it("brings the trigger to the state of a list added on its own after connect", async () => {
+    it("opens an empty list added on its own after the open list left", async () => {
       instance().open();
       listEl().remove();
       await tick();
@@ -1170,8 +1254,9 @@ describe("ListboxController", () => {
       root().append(late);
       await tick();
 
-      expect(late.hidden).toBe(true);
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(late.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(active()).toBeNull();
     });
 
     it("shows the list that stays when an earlier one only drops its target token", async () => {
@@ -1305,7 +1390,7 @@ describe("ListboxController", () => {
       expect(trigger().getAttribute("aria-expanded")).toBe("false");
     });
 
-    it("keeps closed a list that arrives after the one it showed left", async () => {
+    it("opens a list that arrives after the one it showed left", async () => {
       instance().open();
       const original = listEl();
       original.remove();
@@ -1316,7 +1401,7 @@ describe("ListboxController", () => {
       trigger().after(late);
       await tick();
 
-      expect(late.hidden).toBe(true);
+      expect(late.hidden).toBe(false);
     });
 
     it("gives a trigger that stops being the target back its authored closed state", async () => {
@@ -1727,7 +1812,7 @@ describe("ListboxController typeahead", () => {
     expect(active()).toBe("ta-1"); // wraps
   });
 
-  it("resumes narrowing after a repeat instead of stalling on a dead query", () => {
+  it("keeps the repeated-prefix match active after the following character", () => {
     vi.useFakeTimers();
     try {
       pressKey(trigger(), "ArrowDown"); // open, activates ta-1
@@ -1736,7 +1821,7 @@ describe("ListboxController typeahead", () => {
       pressKey(trigger(), "s");
       expect(active()).toBe("ta-3"); // repeat: the query stays "s"
       pressKey(trigger(), "e");
-      expect(active()).toBe("ta-3"); // "se" -> Send, the only match
+      expect(active()).toBe("ta-3"); // The Send option remains active.
     } finally {
       vi.useRealTimers();
     }
@@ -2728,5 +2813,324 @@ describe("ListboxController settled reports", () => {
     await tick();
     expect(seen).toEqual(["change:b"]);
     expect(submitted()).toBe("b");
+  });
+});
+
+/** Option departure gives back selection attributes while preserving derived content rules. */
+describe("ListboxController option ownership", () => {
+  let application: Application | undefined;
+  const element = (id: string): HTMLElement => {
+    const found = document.getElementById(id);
+    if (!found) throw new Error(`Missing listbox ownership fixture ${id}`);
+    return found;
+  };
+  const option = (value: string): HTMLElement => {
+    const found = document.querySelector<HTMLElement>(`[data-value="${value}"]`);
+    if (!found) throw new Error(`Missing listbox option ${value}`);
+    return found;
+  };
+  const instance = (): ListboxController =>
+    application?.getControllerForElementAndIdentifier(
+      element("ownership-host"),
+      "stimeo--listbox",
+    ) as ListboxController;
+  const mount = async (
+    authored: boolean,
+    ids = true,
+    initial: string | null = null,
+  ): Promise<void> => {
+    document.body.innerHTML = `<form id="ownership-form"><div id="ownership-host"
+      data-controller="stimeo--listbox">
+      <button id="ownership-trigger" type="button" role="combobox" aria-label="Fruit"
+        aria-haspopup="listbox" aria-expanded="false" aria-controls="ownership-list"
+        data-stimeo--listbox-target="trigger"
+        data-action="keydown->stimeo--listbox#onTriggerKeydown">
+        <span id="ownership-label" data-stimeo--listbox-target="value">Choose…</span>
+      </button>
+      <div id="ownership-list" role="listbox" hidden data-stimeo--listbox-target="list">
+        ${[
+          ["a", "Apple"],
+          ["b", "Banana"],
+          ["c", "Cherry"],
+        ]
+          .map(
+            ([value, label]) =>
+              `<div ${ids ? `id="ownership-${value}"` : ""} role="option" data-value="${value}"
+            ${initial === value ? 'aria-selected="true"' : authored ? 'aria-selected="false"' : ""}
+            data-stimeo--listbox-target="option"
+            data-action="click->stimeo--listbox#select">${label}</div>`,
+          )
+          .join("")}
+      </div>
+      <input type="hidden" name="fruit" data-stimeo--listbox-target="field">
+    </div></form>`;
+    application = Application.start();
+    application.register("stimeo--listbox", ListboxController);
+    await tick();
+    option("a").click();
+    await tick();
+  };
+  const submitted = () => new FormData(element("ownership-form") as HTMLFormElement).get("fruit");
+  const depart = (target: HTMLElement, kind: "token" | "identifier"): void => {
+    if (kind === "token") target.removeAttribute("data-stimeo--listbox-target");
+    else element("ownership-host").removeAttribute("data-controller");
+  };
+  const hasLease = (target: HTMLElement): boolean =>
+    target.hasAttribute("data-stimeo--listbox-aria-selected-lease");
+  afterEach(() => {
+    if (application) disconnectAndStopApplication(application);
+    application = undefined;
+    document.body.innerHTML = "";
+  });
+
+  describe.each([false, true])("with authored selection=%s", (authored) => {
+    it.each(["token", "identifier"] as const)(
+      "returns live selection on %s departure",
+      async (kind) => {
+        await mount(authored);
+        instance().open();
+        const target = option("a");
+        expect(target.getAttribute("aria-selected")).toBe("true");
+        expect(target.hasAttribute("data-active")).toBe(true);
+        const native = vi.fn();
+        const user = vi.fn();
+        const reconciled = vi.fn();
+        element("ownership-host").addEventListener("change", native);
+        element("ownership-host").addEventListener("stimeo--listbox:change", user);
+        element("ownership-host").addEventListener("stimeo--listbox:reconcile", reconciled);
+        depart(target, kind);
+        await tick();
+        expect(target.getAttribute("aria-selected")).toBe(authored ? "false" : null);
+        expect(target.hasAttribute("data-active")).toBe(false);
+        expect(hasLease(target)).toBe(false);
+        expect(submitted()).toBe(kind === "token" ? "" : "a");
+        expect(element("ownership-label").textContent).toBe(kind === "token" ? "Choose…" : "Apple");
+        expect(native).not.toHaveBeenCalled();
+        expect(user).not.toHaveBeenCalled();
+        expect(reconciled).toHaveBeenCalledTimes(kind === "token" ? 1 : 0);
+      },
+    );
+
+    it.each(["token", "identifier"] as const)(
+      "returns cached selection on %s departure",
+      async (kind) => {
+        await mount(authored);
+        if (!application) throw new Error("Missing listbox application");
+        application = await restoreFromCache(application, (restored) => {
+          restored.register("stimeo--listbox", ListboxController);
+        });
+        instance().open();
+        const target = option("a");
+        depart(target, kind);
+        await tick();
+        expect(target.getAttribute("aria-selected")).toBe(authored ? "false" : null);
+        expect(target.hasAttribute("data-active")).toBe(false);
+        expect(hasLease(target)).toBe(false);
+        expect(submitted()).toBe(kind === "token" ? "" : "a");
+      },
+    );
+  });
+
+  it("returns the markup's initial true after another option was chosen", async () => {
+    await mount(false, true, "a");
+    const target = option("a");
+    option("b").click();
+    await tick();
+    depart(target, "token");
+    await tick();
+    expect(target.getAttribute("aria-selected")).toBe("true");
+    expect(submitted()).toBe("b");
+  });
+
+  it("returns a controller root that also stops being an option", async () => {
+    await mount(false);
+    const host = element("ownership-host");
+    host.setAttribute("data-stimeo--listbox-target", "option");
+    host.setAttribute("data-value", "root");
+    await tick();
+    instance().select(host);
+    expect(host.getAttribute("aria-selected")).toBe("true");
+    host.removeAttribute("data-controller");
+    await tick();
+    expect(host.getAttribute("aria-selected")).toBeNull();
+    expect(hasLease(host)).toBe(false);
+    expect(submitted()).toBe("root");
+  });
+
+  it("returns an authored true selection after another option was chosen", async () => {
+    await mount(false);
+    const target = option("a");
+    target.setAttribute("aria-selected", "true");
+    await tick();
+    option("b").click();
+    await tick();
+    expect(target.getAttribute("aria-selected")).toBe("false");
+    depart(target, "token");
+    await tick();
+    expect(target.getAttribute("aria-selected")).toBe("true");
+    expect(submitted()).toBe("b");
+    expect(element("ownership-label").textContent).toBe("Banana");
+  });
+
+  it("remembers an observed page false before the option is chosen again", async () => {
+    await mount(false);
+    const target = option("a");
+    target.setAttribute("aria-selected", "false");
+    await tick();
+    expect(submitted()).toBe("");
+    target.click();
+    await tick();
+    depart(target, "token");
+    await tick();
+    expect(target.getAttribute("aria-selected")).toBe("false");
+    expect(hasLease(target)).toBe(false);
+  });
+
+  it.each(["token", "identifier"] as const)(
+    "drains a repeated page selection before %s departure",
+    async (kind) => {
+      await mount(false);
+      const target = option("a");
+      target.setAttribute("aria-selected", "true");
+      depart(target, kind);
+      await tick();
+      expect(target.getAttribute("aria-selected")).toBe("true");
+      expect(hasLease(target)).toBe(false);
+      expect(submitted()).toBe(kind === "token" ? "" : "a");
+    },
+  );
+
+  it("takes a queued page selection before a synchronous user choice overwrites it", async () => {
+    await mount(false);
+    const target = option("a");
+    target.setAttribute("aria-selected", "true");
+    option("b").click();
+    await tick();
+    depart(target, "token");
+    await tick();
+    expect(target.getAttribute("aria-selected")).toBe("true");
+    expect(submitted()).toBe("b");
+  });
+
+  it("adopts page selection changes made while the whole controller was detached", async () => {
+    await mount(false);
+    const host = element("ownership-host");
+    host.remove();
+    await tick();
+    const first = host.querySelector<HTMLElement>('[data-value="a"]');
+    const second = host.querySelector<HTMLElement>('[data-value="b"]');
+    if (!first || !second) throw new Error("Missing detached options");
+    first.setAttribute("aria-selected", "false");
+    second.setAttribute("aria-selected", "true");
+    element("ownership-form").append(host);
+    await tick();
+    expect(submitted()).toBe("b");
+    expect(element("ownership-label").textContent).toBe("Banana");
+    first.click();
+    await tick();
+    depart(second, "token");
+    await tick();
+    expect(second.getAttribute("aria-selected")).toBe("true");
+    expect(submitted()).toBe("a");
+  });
+
+  it.each([false, true])(
+    "keeps selection, active output and form content through a same-scope move, ids=%s",
+    async (ids) => {
+      await mount(false, ids);
+      instance().open();
+      pressKey(element("ownership-trigger"), "ArrowDown");
+      const target = option("b");
+      expect(target.hasAttribute("data-active")).toBe(true);
+      const writes: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => writes.push(...records));
+      observer.observe(element("ownership-host"), {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["aria-selected", "data-active"],
+      });
+      const native = vi.fn();
+      const changed = vi.fn();
+      const reconciled = vi.fn();
+      element("ownership-host").addEventListener("change", native);
+      element("ownership-host").addEventListener("stimeo--listbox:change", changed);
+      element("ownership-host").addEventListener("stimeo--listbox:reconcile", reconciled);
+      const wrapper = document.createElement("div");
+      target.before(wrapper);
+      wrapper.append(target);
+      await tick();
+      observer.disconnect();
+      expect(target.hasAttribute("data-active")).toBe(true);
+      expect(option("a").getAttribute("aria-selected")).toBe("true");
+      expect(target.getAttribute("aria-selected")).toBe("false");
+      expect(submitted()).toBe("a");
+      expect(element("ownership-label").textContent).toBe("Apple");
+      expect(writes).toEqual([]);
+      expect(native).not.toHaveBeenCalled();
+      expect(changed).not.toHaveBeenCalled();
+      expect(reconciled).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps selection and active output during a whole-root detach, then reconnects closed", async () => {
+    await mount(false);
+    instance().open();
+    const host = element("ownership-host");
+    const target = option("a");
+    host.remove();
+    await tick();
+    expect(target.getAttribute("aria-selected")).toBe("true");
+    expect(target.hasAttribute("data-active")).toBe(true);
+    const form = element("ownership-form");
+    form.append(host);
+    await tick();
+    expect(target.getAttribute("aria-selected")).toBe("true");
+    expect(target.hasAttribute("data-active")).toBe(false);
+    expect(submitted()).toBe("a");
+    expect(element("ownership-trigger").getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("returns a token that was removed during a whole-root detach", async () => {
+    await mount(true);
+    const host = element("ownership-host");
+    const target = option("a");
+    host.remove();
+    await tick();
+    target.removeAttribute("data-stimeo--listbox-target");
+    element("ownership-form").append(host);
+    await tick();
+    expect(target.getAttribute("aria-selected")).toBe("false");
+    expect(hasLease(target)).toBe(false);
+    expect(submitted()).toBe("");
+  });
+
+  it("returns a removed option and lets selection and form reconcile once", async () => {
+    await mount(true);
+    instance().open();
+    const target = option("a");
+    const reconciled = vi.fn();
+    element("ownership-host").addEventListener("stimeo--listbox:reconcile", reconciled);
+    target.remove();
+    await tick();
+    expect(target.getAttribute("aria-selected")).toBe("false");
+    expect(target.hasAttribute("data-active")).toBe(false);
+    expect(hasLease(target)).toBe(false);
+    expect(submitted()).toBe("");
+    expect(reconciled).toHaveBeenCalledOnce();
+    target.setAttribute("data-active", "");
+    const atEntry: boolean[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if ([...record.addedNodes].includes(target))
+          atEntry.push(target.hasAttribute("data-active"));
+      }
+    });
+    observer.observe(element("ownership-list"), { childList: true });
+    element("ownership-list").append(target);
+    await tick();
+    observer.disconnect();
+    expect(atEntry).toEqual([false]);
+    expect(target.getAttribute("aria-selected")).toBe("false");
+    expect(submitted()).toBe("");
   });
 });

@@ -6,6 +6,13 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
+interface ObserverRecord {
+  callback: (entries: IntersectionObserverEntry[]) => void;
+  options: IntersectionObserverInit | undefined;
+  observed: Element[];
+  disconnectCount: number;
+}
+
 /**
  * Behavioral tests for {@link StickyObserverController}: directional stuck
  * detection, ordered observer batches, dynamic Stimulus lifecycle changes, the
@@ -15,14 +22,6 @@ import { tick } from "./helpers/timing";
  * entry still carries real directional geometry so the test can distinguish a
  * sentinel above the root from one that has not reached the root yet.
  */
-
-interface ObserverRecord {
-  callback: (entries: IntersectionObserverEntry[]) => void;
-  options: IntersectionObserverInit | undefined;
-  observed: Element[];
-  disconnectCount: number;
-}
-
 describe("StickyObserverController", () => {
   let application: Application | undefined;
   let observers: ObserverRecord[];

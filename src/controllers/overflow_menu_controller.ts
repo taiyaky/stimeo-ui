@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { ownerOf } from "../utils/event_owner";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { LayoutObserver } from "../utils/layout_observer";
@@ -149,10 +150,11 @@ interface MovableParent {
  * **Turbo.** The managed set and the canonical order are rebuilt *from the DOM* every
  * pass, so a fresh `connect()` onto markup that already holds banked items (cache restore,
  * a morph, a clone, server-rendered overflow) re-adopts them instead of orphaning them
- * inside a wrapper it would then hide. Symmetrically, `disconnect()` returns every item
- * to the bar, collapses the composed menu (so it releases its dismissal-stack
- * membership), takes back the More label the trigger still holds alone, and strips the
- * items' bookkeeping attributes. `turbo:before-cache` changes nothing: Turbo also
+ * inside a wrapper it would then hide. On a tree that stays in the document,
+ * `disconnect()` returns every item to the bar, collapses the composed menu,
+ * takes back the More label the trigger still holds alone, and strips the items'
+ * bookkeeping attributes. A whole-root detach keeps the banked placement and
+ * semantics for the next connection to read. `turbo:before-cache` changes nothing: Turbo also
  * dispatches it on pages that stay (a promoted frame navigation, a `popstate` without
  * Turbo state, a refresh of a cached URL), where the bar stays balanced and an open
  * More menu stays open, and a page restored from its cache is re-adopted and balanced
@@ -166,10 +168,11 @@ interface MovableParent {
  * balanced by a pass of its own, which reports `reconcile` only when the overflow count
  * moved. The row and the wrapper balanced before are handed back first, so a banked item
  * is neither lost nor counted twice. A row or a wrapper
- * that stops resolving as the target is handed back the way `disconnect()` hands
- * back the bar: the items banked from a row return to it, and a wrapper is hidden
- * with its menu collapsed and its label taken back — after `disconnect()` too, since
- * dropping the identifier leaves both on the page.
+ * that stops resolving as the target is handed back: the items banked from a row
+ * return to it, and a wrapper gets its authored `hidden` back, with its menu
+ * collapsed and its label taken back, after `disconnect()` too. A subsequent page
+ * write to `hidden` stays. Same-scope moves retain the current balance, and lease
+ * records carry authored visibility across cache copies.
  *
  * Behavior only — no styling.
  */
@@ -210,6 +213,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
 
   readonly #layout = new LayoutObserver(() => this.#scheduleUpdate());
   readonly #timers = new SafeTimeout();
+  readonly #moreHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
   /** The managed items in canonical (authored) order, rebuilt from the DOM each pass. */
   #items: HTMLElement[] = [];
   #index = new WeakMap<HTMLElement, number>();
@@ -262,7 +266,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     this.#connected = false;
     this.#layout.disconnect();
     this.#timers.clearAll();
-    this.#restoreAll();
+    if (this.element.isConnected) this.#restoreAll();
     this.#lastHidden = null;
   }
 
@@ -287,11 +291,14 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   }
 
   /**
-   * Hands the items banked in a More wrapper that no longer resolves as the target back to
-   * the row, and hides it — after `disconnect()` too — then balances the wrapper that stays.
+   * Hands banked items back and returns a departed wrapper's authored visibility,
+   * after `disconnect()` too, then balances the wrapper that stays.
    */
   moreTargetDisconnected(more: HTMLElement): void {
-    if (more === this.#wrapper && !this.moreTargets.includes(more)) this.#release();
+    if (!this.scope.containsElement(more) || !this.moreTargets.includes(more)) {
+      if (more === this.#wrapper) this.#release();
+      this.#moreHidden.return(more);
+    }
     this.#followTargets();
   }
 
@@ -330,7 +337,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
 
     // Reveal More so its trigger is measurable, then refresh the widths of the items
     // currently in the bar (menu items keep their location-independent last value).
-    this.moreTarget.hidden = false;
+    this.#moreHidden.write(this.moreTarget, null);
     // Server-rendered overflow arrives with items already in the menu, which is
     // hidden, so they measure zero and the budget would read as "everything fits".
     // Bring the set back to the bar once, unbanked, so the first balance works from
@@ -445,7 +452,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       if (inMore && pass === this.#pass) this.#rescueFocus();
       if (pass !== this.#pass) return null;
     }
-    this.moreTarget.hidden = count === 0;
+    this.#moreHidden.write(this.moreTarget, count === 0 ? "" : null);
     if (count > 0) this.element.setAttribute("data-overflowing", "true");
     else this.element.removeAttribute("data-overflowing");
     this.element.setAttribute("data-overflow-count", String(count));
@@ -824,14 +831,14 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       this.#unbank(item);
       item.removeAttribute(this.#attr(INDEX));
     }
-    // The wrapper is being hidden for good, so the composed menu must not stay
-    // expanded behind it: an unclosed menu keeps its dismissal-stack membership.
+    // The wrapper no longer participates in the balance, so its composed menu
+    // releases the dismissal-stack membership it held while expanded.
     // Focus is left exactly where it is — this path runs at teardown, where moving
     // it would be the surprise.
     this.#closeMenu(more);
     const trigger = this.#trigger(more);
     if (trigger !== null) this.#releaseLabel(trigger);
-    more.hidden = true;
+    this.#moreHidden.return(more);
     this.element.removeAttribute("data-overflowing");
     this.element.removeAttribute("data-overflow-count");
     this.#tabindex.returnAll();

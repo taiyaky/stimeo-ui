@@ -52,7 +52,7 @@ describe("BulkSelectController", () => {
     Array.from(
       document.querySelectorAll<HTMLInputElement>("[data-stimeo--bulk-select-target='item']"),
     );
-  /** Definite row accessor (the lint bans `!`, and indexing is `| undefined`). */
+  /** Returns the indexed checkbox or throws when the fixture has no such row. */
   const itemAt = (index: number): HTMLInputElement => {
     const box = items()[index];
     if (!box) throw new Error(`No item at index ${index}`);
@@ -570,7 +570,7 @@ describe("BulkSelectController", () => {
     expect(bar().hidden).toBe(true);
   });
 
-  it("drops a repair queued before disconnect", async () => {
+  it("does not reconcile a row removal delivered after disconnect", async () => {
     await start(MARKUP());
     setChecked(itemAt(0), true);
     const controller = application.getControllerForElementAndIdentifier(
@@ -926,7 +926,7 @@ describe("BulkSelectController", () => {
       expect(kept.hidden).toBe(false);
     });
 
-    it("writes nothing onto the bar or the count while Stimulus tears the controller down", async () => {
+    it("preserves page-authored bar visibility and count text when Stimulus unloads the controller", async () => {
       await start(MARKUP());
       setChecked(itemAt(0), true);
       // Values the page wrote after the last write stay where they were left.

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EscapeLayer } from "../../src/utils/escape_layer";
 import { FocusTrap, type FocusTrapOptions } from "../../src/utils/focus_trap";
+import { sharedRegistry } from "../../src/utils/shared_registry";
 import { keyEvent, press as pressKey, typeKey } from "../helpers/keyboard";
 import { withinTimeLimit } from "../helpers/time_limit";
 import { flushMicrotasks } from "../helpers/timing";
@@ -951,17 +952,389 @@ describe("FocusTrap", () => {
       expect(document.activeElement).toBe(byId("b"));
     });
 
-    it("treats focus on the body as outside", () => {
+    it("continues from the element that lost focus to the body", () => {
       three();
       trap(soft).activate();
 
       (document.activeElement as HTMLElement).blur();
       press();
-      expect(document.activeElement).toBe(byId("a"));
+      expect(document.activeElement).toBe(byId("b"));
 
       (document.activeElement as HTMLElement).blur();
       press({ shiftKey: true });
+      expect(document.activeElement).toBe(byId("a"));
+    });
+
+    it("treats focus on the body as outside when no element in the container held it", () => {
+      three();
+      trap({ ...soft, autoFocus: false }).activate();
+      byId("opener").focus();
+      byId("opener").blur();
+
+      press();
+      expect(document.activeElement).toBe(byId("a"));
+
+      byId("opener").focus();
+      byId("opener").blur();
+      press({ shiftKey: true });
       expect(document.activeElement).toBe(byId("c"));
+    });
+
+    describe("from where a pointer press hit", () => {
+      const paragraphs = () => {
+        container.innerHTML =
+          '<button id="a">A</button><p id="t1">First text</p><button id="b">B</button>' +
+          '<p id="t2">Second text</p><button id="c">C</button>';
+      };
+      /** A press on `target`; the engine's own focus change is left to each test. */
+      const pressOn = (target: Node) =>
+        target.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true }));
+      /** Makes the engine report a caret at `node`/`offset` for the duration of `run`. */
+      const withCaret = (node: Node, offset: number, run: () => void) => {
+        Object.defineProperty(document, "caretPositionFromPoint", {
+          configurable: true,
+          value: () => ({ offsetNode: node, offset }),
+        });
+        try {
+          run();
+        } finally {
+          Reflect.deleteProperty(document, "caretPositionFromPoint");
+        }
+      };
+      const blurActive = () => (document.activeElement as HTMLElement | null)?.blur();
+
+      it("starts a Tab after, and a Shift+Tab before, the element a press hit with nothing focused", () => {
+        paragraphs();
+        trap(soft).activate();
+
+        pressOn(byId("t1"));
+        blurActive();
+        press();
+        expect(document.activeElement).toBe(byId("b"));
+
+        pressOn(byId("t2"));
+        blurActive();
+        press({ shiftKey: true });
+        expect(document.activeElement).toBe(byId("b"));
+      });
+
+      it("takes the caret position the engine reports inside the pressed element", () => {
+        container.innerHTML =
+          '<button id="a">A</button><p id="mix">lead <a href="#" id="l1">one</a> middle ' +
+          '<a href="#" id="l2">two</a></p><button id="c">C</button>';
+        trap(soft).activate();
+        const middle = byId("mix").childNodes[2] as Text;
+
+        withCaret(middle, 3, () => pressOn(byId("mix")));
+        blurActive();
+        press();
+        expect(document.activeElement).toBe(byId("l2"));
+
+        withCaret(middle, 3, () => pressOn(byId("mix")));
+        blurActive();
+        press({ shiftKey: true });
+        expect(document.activeElement).toBe(byId("l1"));
+      });
+
+      it("takes a caret the engine reports between an element's children", () => {
+        container.innerHTML =
+          '<button id="a">A</button><p id="mix">lead <a href="#" id="l1">one</a> middle ' +
+          '<a href="#" id="l2">two</a></p><button id="c">C</button>';
+        trap(soft).activate();
+
+        withCaret(byId("mix"), 3, () => pressOn(byId("mix")));
+        blurActive();
+        press();
+        expect(document.activeElement).toBe(byId("l2"));
+      });
+
+      it("starts at the pressed element when the engine reports no caret", () => {
+        container.innerHTML =
+          '<button id="a">A</button><p id="mix">lead <a href="#" id="l1">one</a> middle ' +
+          '<a href="#" id="l2">two</a></p><button id="c">C</button>';
+        trap(soft).activate();
+        Object.defineProperty(document, "caretPositionFromPoint", {
+          configurable: true,
+          value: () => null,
+        });
+        try {
+          pressOn(byId("mix"));
+        } finally {
+          Reflect.deleteProperty(document, "caretPositionFromPoint");
+        }
+        blurActive();
+        press();
+        expect(document.activeElement).toBe(byId("l1"));
+      });
+
+      it("takes the caret range an engine without caret positions reports", () => {
+        container.innerHTML =
+          '<button id="a">A</button><p id="mix">lead <a href="#" id="l1">one</a> middle ' +
+          '<a href="#" id="l2">two</a></p><button id="c">C</button>';
+        trap(soft).activate();
+        const middle = byId("mix").childNodes[2] as Text;
+        let report: Range | null = document.createRange();
+        report.setStart(middle, 3);
+        Object.defineProperty(document, "caretRangeFromPoint", {
+          configurable: true,
+          value: () => report,
+        });
+        try {
+          pressOn(byId("mix"));
+          blurActive();
+          press();
+          expect(document.activeElement).toBe(byId("l2"));
+
+          report = null;
+          pressOn(byId("mix"));
+          blurActive();
+          press();
+          expect(document.activeElement).toBe(byId("l1"));
+        } finally {
+          Reflect.deleteProperty(document, "caretRangeFromPoint");
+        }
+      });
+
+      it("starts at a text field a press hit when the caret is a place in its value", () => {
+        container.innerHTML =
+          '<button id="a">A</button><input id="field" value="some text"><button id="c">C</button>';
+        trap(soft).activate();
+
+        expect(() => withCaret(byId("field"), 3, () => pressOn(byId("field")))).not.toThrow();
+        blurActive();
+        press();
+        expect(document.activeElement).toBe(byId("c"));
+      });
+
+      it("asks the engine for the caret inside the open shadow roots the press went through", () => {
+        container.innerHTML =
+          '<button id="a">A</button><div id="host"></div><button id="c">C</button>';
+        const shadow = byId("host").attachShadow({ mode: "open" });
+        shadow.innerHTML =
+          '<p id="mix">lead <a href="#" id="l1">one</a> middle <a href="#" id="l2">two</a></p>';
+        trap(soft).activate();
+        const middle = (shadow.getElementById("mix") as HTMLElement).childNodes[2] as Text;
+        let roots: unknown;
+        Object.defineProperty(document, "caretPositionFromPoint", {
+          configurable: true,
+          value: (_x: number, _y: number, options?: { shadowRoots?: ShadowRoot[] }) => {
+            roots = options?.shadowRoots;
+            return { offsetNode: middle, offset: 3 };
+          },
+        });
+        try {
+          pressOn(shadow.getElementById("mix") as HTMLElement);
+        } finally {
+          Reflect.deleteProperty(document, "caretPositionFromPoint");
+        }
+        blurActive();
+        press();
+
+        expect(roots).toEqual([shadow]);
+        expect(shadow.activeElement).toBe(shadow.getElementById("l2"));
+      });
+
+      it("lets a focused stop start the move over a press inside it", () => {
+        container.innerHTML =
+          '<button id="a">A</button><div id="region" tabindex="0"><button id="r1">R1</button>' +
+          '<button id="b"><span id="label">B</span></button><button id="r3">R3</button></div>' +
+          '<button id="c">C</button>';
+        trap(soft).activate();
+
+        byId("region").focus();
+        pressOn(byId("label"));
+        press();
+        expect(document.activeElement).toBe(byId("r1"));
+      });
+
+      it("continues inside a region that is a stop from an element hidden there", () => {
+        container.innerHTML =
+          '<button id="a">A</button><div id="region" tabindex="0"><button id="r1">R1</button>' +
+          '<button id="r2">R2</button><button id="r3">R3</button></div><button id="c">C</button>';
+        trap(soft).activate();
+
+        byId("r2").focus();
+        byId("r2").hidden = true;
+        blurActive();
+        press();
+        expect(document.activeElement).toBe(byId("r3"));
+
+        byId("r2").hidden = false;
+        byId("r2").focus();
+        byId("r2").hidden = true;
+        blurActive();
+        press({ shiftKey: true });
+        expect(document.activeElement).toBe(byId("r1"));
+      });
+
+      it("starts at the pressed element when the reported caret lies outside it", () => {
+        container.innerHTML =
+          '<button id="a">A</button><p id="mix">lead <a href="#" id="l1">one</a> middle ' +
+          '<a href="#" id="l2">two</a></p><button id="c">C</button>';
+        trap(soft).activate();
+
+        withCaret(byId("c"), 0, () => pressOn(byId("mix")));
+        blurActive();
+        press();
+        expect(document.activeElement).toBe(byId("l1"));
+      });
+
+      it("keeps the press position when the element the press focused is not a stop", () => {
+        container.innerHTML =
+          '<button id="a">A</button><div id="region" tabindex="-1"><button id="r1">R1</button>' +
+          '<p id="text">Text</p><button id="r2">R2</button></div><button id="c">C</button>';
+        trap(soft).activate();
+
+        pressOn(byId("text"));
+        byId("region").focus();
+        press();
+        expect(document.activeElement).toBe(byId("r2"));
+
+        pressOn(byId("text"));
+        byId("region").focus();
+        press({ shiftKey: true });
+        expect(document.activeElement).toBe(byId("r1"));
+      });
+
+      it("keeps the press position when the press focused the container itself", () => {
+        paragraphs();
+        container.setAttribute("tabindex", "-1");
+        trap(soft).activate();
+
+        pressOn(byId("t1"));
+        container.focus();
+        press();
+        expect(document.activeElement).toBe(byId("b"));
+      });
+
+      it("starts from the element that took focus once focus moves on after the press", () => {
+        container.innerHTML =
+          '<button id="a">A</button><div id="region" tabindex="-1"><button id="r1">R1</button>' +
+          '<p id="text">Text</p><button id="r2">R2</button></div><button id="c">C</button>';
+        trap(soft).activate();
+
+        pressOn(byId("text"));
+        byId("region").focus();
+        byId("a").focus();
+        byId("region").focus();
+        press();
+        expect(document.activeElement).toBe(byId("r1"));
+      });
+
+      it("forgets the press position once focus comes back to the element without a press", () => {
+        container.innerHTML =
+          '<button id="a">A</button><div id="region" tabindex="-1"><button id="r1">R1</button>' +
+          '<p id="text">Text</p><button id="r2">R2</button></div><button id="c">C</button>';
+        trap(soft).activate();
+
+        pressOn(byId("text"));
+        byId("region").focus();
+        byId("region").blur();
+        byId("region").focus();
+        press();
+        expect(document.activeElement).toBe(byId("r1"));
+      });
+
+      it("keeps the press position on text right in the shadow root of a host that took focus", () => {
+        container.innerHTML =
+          '<button id="a">A</button><div id="host" tabindex="-1"></div><button id="c">C</button>';
+        const shadow = byId("host").attachShadow({ mode: "open" });
+        shadow.innerHTML = '<button id="s1">S1</button>Bare text<button id="s2">S2</button>';
+        trap(soft).activate();
+
+        pressOn(shadow.childNodes[1] as Text);
+        byId("host").focus();
+        press();
+        expect(shadow.activeElement).toBe(shadow.getElementById("s2"));
+      });
+
+      it("enters at the first stop from focus that sat outside before activation", () => {
+        paragraphs();
+        byId("opener").focus();
+        trap({ ...soft, autoFocus: false }).activate();
+
+        press();
+        expect(document.activeElement).toBe(byId("a"));
+      });
+
+      it("moves a focused stop along the order, not the tree", () => {
+        container.innerHTML =
+          '<button id="a">A</button><button id="p1" tabindex="1">P1</button>' +
+          '<button id="b">B</button>';
+        trap(soft).activate();
+
+        byId("p1").focus();
+        press();
+        expect(document.activeElement).toBe(byId("a"));
+      });
+
+      it("lets a stop the press focused replace the press position", () => {
+        container.innerHTML =
+          '<button id="a">A</button><button id="b"><span id="label">B</span></button>' +
+          '<button id="c">C</button>';
+        trap(soft).activate();
+
+        pressOn(byId("label"));
+        byId("b").focus();
+        press({ shiftKey: true });
+        expect(document.activeElement).toBe(byId("a"));
+      });
+
+      it("continues from the place of a focused element that leaves", () => {
+        three();
+        trap(soft).activate();
+        byId("b").focus();
+
+        byId("b").remove();
+        blurActive();
+        press({ shiftKey: true });
+        expect(document.activeElement).toBe(byId("a"));
+      });
+
+      it("ignores a press outside the container", () => {
+        paragraphs();
+        trap(soft).activate();
+
+        pressOn(byId("background"));
+        blurActive();
+        press();
+        expect(document.activeElement).toBe(byId("a"));
+      });
+
+      it("starts at a press inside an open shadow root in the container", () => {
+        container.innerHTML =
+          '<button id="a">A</button><div id="host"></div><button id="c">C</button>';
+        const shadow = byId("host").attachShadow({ mode: "open" });
+        shadow.innerHTML =
+          '<button id="s1">S1</button><p id="text">Text</p><button id="s2">S2</button>';
+        trap(soft).activate();
+
+        pressOn(shadow.getElementById("text") as HTMLElement);
+        blurActive();
+        press();
+        expect(shadow.activeElement).toBe(shadow.getElementById("s2"));
+      });
+
+      it("forgets the position and stops listening once the last trap is released", () => {
+        paragraphs();
+        const first = trap(soft);
+        first.activate();
+        pressOn(byId("t2"));
+        blurActive();
+        const removed = vi.spyOn(document, "removeEventListener");
+        first.deactivate({ restoreFocus: false });
+
+        expect(removed).toHaveBeenCalledWith("pointerdown", expect.any(Function), {
+          capture: true,
+        });
+        expect(removed).toHaveBeenCalledWith("focusin", expect.any(Function), { capture: true });
+        removed.mockRestore();
+
+        trap({ ...soft, autoFocus: false }).activate();
+        blurActive();
+        press();
+        expect(document.activeElement).toBe(byId("a"));
+      });
     });
 
     it("consumes a Tab and moves nothing when the container has no stop", () => {
@@ -1399,7 +1772,7 @@ describe("FocusTrap", () => {
       expect(walk(4, true)).toEqual(["z2", "z1", "p2", "p1"]);
     });
 
-    it("stops once per radio group: on its checked radio, or on the first of an unchecked group", () => {
+    it("stops once per radio group: on its checked radio, or by entry direction when unchecked", () => {
       container.innerHTML = `
         <button id="a">A</button>
         ${radio("g1", "g1-1")}${radio("g1", "g1-2", "checked")}${radio("g1", "g1-3")}
@@ -1409,7 +1782,43 @@ describe("FocusTrap", () => {
       trap(soft).activate();
 
       expect(walk(5)).toEqual(["g1-2", "b", "g2-1", "c", "a"]);
-      expect(walk(5, true)).toEqual(["c", "g2-1", "b", "g1-2", "a"]);
+      expect(walk(5, true)).toEqual(["c", "g2-3", "b", "g1-2", "a"]);
+    });
+
+    it.each([
+      ["plain", "", ""],
+      ["disabled ends", "disabled", "disabled"],
+      ["negative ends", 'tabindex="-1"', 'tabindex="-1"'],
+    ])("enters a fresh unchecked group backward with %s", (_name, first, last) => {
+      container.innerHTML =
+        `<button id="a">A</button>${radio("g", "g1", first)}` +
+        `${radio("g", "g2")}${radio("g", "g3")}${radio("g", "g4", last)}` +
+        '<button id="b">B</button>';
+      trap(soft).activate();
+      byId("b").focus();
+
+      expect(walk(1, true)).toEqual([last === "" ? "g4" : "g3"]);
+    });
+
+    it("wraps backward onto an unchecked group's last radio", () => {
+      container.innerHTML = `<button id="a">A</button>${radio("g", "g1")}${radio("g", "g2")}`;
+      trap(soft).activate();
+
+      expect(walk(1, true)).toEqual(["g2"]);
+    });
+
+    it("re-enters an unchecked group by direction after a middle radio held focus", () => {
+      container.innerHTML =
+        `<button id="a">A</button>${radio("g", "g1")}` +
+        `${radio("g", "g2")}${radio("g", "g3")}<button id="b">B</button>`;
+      trap(soft).activate();
+      byId("g2").focus();
+
+      expect(walk(1)).toEqual(["b"]);
+      expect(walk(1, true)).toEqual(["g3"]);
+      byId("g2").focus();
+      expect(walk(1, true)).toEqual(["a"]);
+      expect(walk(1)).toEqual(["g1"]);
     });
 
     it("keeps a checked radio a stop from inside its group, and leaves an unchecked group's stop behind", () => {
@@ -1877,6 +2286,37 @@ describe("FocusTrap", () => {
         return focused();
       });
 
+    it.each([false, true])(
+      "ignores an obsolete lower return path after fallback re-entry (reopened: %s)",
+      (reopened) => {
+        byId("x").focus();
+        const lower = layer("a", {
+          autoFocus: false,
+          fallbackFocus: () => byId("x"),
+        });
+        lower.activate();
+        byId("y").focus();
+        const upper = layer("b", {
+          fallbackFocus: () => {
+            lower.deactivate({ restoreFocus: false });
+            if (reopened) {
+              byId("x").focus();
+              lower.activate();
+            }
+            byId("c2").focus();
+            return null;
+          },
+        });
+        upper.activate();
+        byId("a").remove();
+
+        close(upper, "b");
+
+        expect(lower.active).toBe(reopened);
+        expect(focused()).toBe("c2");
+      },
+    );
+
     it.each([
       ["the upper one first", ["b", "a"], ["y", "x"]],
       ["the lower one first", ["a", "b"], ["b1", "x"]],
@@ -2047,6 +2487,61 @@ describe("FocusTrap", () => {
       expect(focused()).toBe("x");
     });
 
+    it.each([true, false])(
+      "borrows the return path of a lower trap whose container is absent (opener present: %s)",
+      (openerPresent) => {
+        document.body.insertAdjacentHTML("beforeend", '<button id="fallback">Fallback</button>');
+        byId("x").focus();
+        const lower = layer("a", { fallbackFocus: () => byId("fallback") });
+        lower.activate();
+        byId("y").focus();
+        const upper = layer("b");
+        upper.activate();
+        const panel = byId("a");
+        panel.remove();
+        if (!openerPresent) byId("x").remove();
+        lower.refreshContainer();
+
+        close(upper, "b");
+        expect(focused()).toBe(openerPresent ? "x" : "fallback");
+        expect(lower.active).toBe(true);
+        document.body.append(panel);
+        lower.refreshContainer();
+        expect(focused()).toBe("a1");
+        close(lower, "a");
+        expect(focused()).toBe(openerPresent ? "x" : "fallback");
+      },
+    );
+
+    it("keeps a lower trap active when its shared entry has no return-target provider", () => {
+      byId("x").focus();
+      const lower = layer("a", { lockScroll: true });
+      lower.activate();
+      byId("y").focus();
+      const upper = layer("b");
+      upper.activate();
+      const panel = byId("a");
+      panel.remove();
+      lower.refreshContainer();
+      const registry = sharedRegistry(
+        "stimeo-ui.focus-trap.registry.v3",
+        () => new WeakMap<Document, { stack: { returnTargets?: () => Iterable<HTMLElement> }[] }>(),
+      );
+      const entry = registry.get(document)?.stack[0];
+      if (!entry) throw new Error("Missing lower trap");
+      delete entry.returnTargets;
+
+      close(upper, "b");
+      expect(lower.active).toBe(true);
+      expect(document.body.style.overflow).toBe("hidden");
+      document.body.append(panel);
+      lower.refreshContainer();
+      expect(focused()).toBe("a1");
+      close(lower, "a");
+      expect(focused()).toBe("x");
+      expect(document.body.style.overflow).toBe("");
+    });
+
     it("sends focus into the trap below when the upper trap's opener left with a replaced container, and to the first opener after it", () => {
       let lowerContainer = byId("a");
       const successor = document.createElement("div");
@@ -2213,6 +2708,41 @@ describe("FocusTrap", () => {
       t.activate();
       expect(document.activeElement).toBe(container);
       expect(container.getAttribute("tabindex")).toBe("-1");
+    });
+
+    it("returns the tabindex of a trap reactivated during the previous return", () => {
+      let reactivate: (() => void) | undefined;
+      class ReactivatingSurface extends HTMLElement {
+        static readonly observedAttributes = ["tabindex"];
+
+        attributeChangedCallback(_name: string, previous: string | null, next: string | null) {
+          if (previous !== "-1" || next !== null) return;
+          const activate = reactivate;
+          reactivate = undefined;
+          activate?.();
+        }
+      }
+      customElements.define("reactivating-test-surface", ReactivatingSurface);
+      const surface = document.createElement("reactivating-test-surface");
+      surface.textContent = "Text only";
+      container.replaceWith(surface);
+      container = surface;
+      const opener = byId("opener");
+      const t = trap({ isolate: false, lockScroll: false });
+      opener.focus();
+      t.activate();
+      expect(surface.getAttribute("tabindex")).toBe("-1");
+      reactivate = () => t.activate();
+
+      t.deactivate();
+      expect(t.active).toBe(true);
+      expect(document.activeElement).toBe(surface);
+      expect(surface.getAttribute("tabindex")).toBe("-1");
+
+      t.deactivate();
+      expect(t.active).toBe(false);
+      expect(document.activeElement).toBe(opener);
+      expect(surface.getAttribute("tabindex")).toBeNull();
     });
 
     it("takes back a loan kept on a focused container when a release while inactive finds focus elsewhere", () => {

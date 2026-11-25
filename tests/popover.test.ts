@@ -963,7 +963,7 @@ describe("PopoverController", () => {
       expect(panel().hidden).toBe(true);
     });
 
-    it("releases the layer, the scroll dismissal and aria-expanded when the open panel leaves", async () => {
+    it("keeps Escape and expanded state while dropping scroll when the open panel leaves", async () => {
       disconnectAndStopApplication(application);
       await start(defaultPanelInner, true);
       trigger().click();
@@ -973,20 +973,21 @@ describe("PopoverController", () => {
       departed.remove();
       await tick();
 
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
       expect(departed.hidden).toBe(true);
-      expect(pressEscape()).toBe(false);
+      expect(pressEscape()).toBe(true);
       // No scroll listener is left: a panel put back and shown by hand stays shown.
       root().append(departed);
       departed.hidden = false;
       window.dispatchEvent(new Event("scroll"));
       expect(departed.hidden).toBe(false);
-      // Target churn is not a state move anyone made, so it reports nothing.
-      expect(capture.seen).toEqual([]);
+      // Target churn is silent; Escape reports the retained state's close once.
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["escape"]);
     });
 
     for (const order of ["removed first", "added first"] as const) {
-      it(`hands the next open to a panel a morph swapped in (${order})`, async () => {
+      it(`carries the open state to a panel a morph swapped in (${order})`, async () => {
         disconnectAndStopApplication(application);
         await start(defaultPanelInner, true);
         trigger().click();
@@ -1003,10 +1004,11 @@ describe("PopoverController", () => {
         }
         await tick();
 
-        expect(trigger().getAttribute("aria-expanded")).toBe("false");
-        expect(arrived.hidden).toBe(true);
-        expect(pressEscape()).toBe(false);
+        expect(trigger().getAttribute("aria-expanded")).toBe("true");
+        expect(arrived.hidden).toBe(false);
         expect(capture.seen).toEqual([]);
+        expect(pressEscape()).toBe(true);
+        expect(arrived.hidden).toBe(true);
 
         trigger().click();
         expect(arrived.hidden).toBe(false);
@@ -1015,20 +1017,20 @@ describe("PopoverController", () => {
         expect(arrived.hidden).toBe(true);
         // The scroll close released the one layer this open took.
         expect(pressEscape()).toBe(false);
-        expect(capture.names()).toEqual(["open", "close"]);
-        expect(capture.reasons()).toEqual(["user", "scroll"]);
+        expect(capture.names()).toEqual(["close", "open", "close"]);
+        expect(capture.reasons()).toEqual(["escape", "user", "scroll"]);
       });
     }
 
-    it("writes the closed state onto a replacement panel that arrives shown", async () => {
+    it("keeps a replacement panel shown while carrying the open state", async () => {
       trigger().click();
       const departed = panel();
       const arrived = freshPanel();
       arrived.hidden = false;
       departed.replaceWith(arrived);
       await tick();
-      expect(arrived.hidden).toBe(true);
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(arrived.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
       expect(capture.names()).toEqual(["open"]);
     });
 
@@ -1063,7 +1065,7 @@ describe("PopoverController", () => {
       controller().panelTargetDisconnected(departed);
       controller().disconnect();
       controller().panelTargetDisconnected(departed);
-      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
       expect(pressEscape()).toBe(false);
       expect(capture.names()).toEqual(["open"]);
     });

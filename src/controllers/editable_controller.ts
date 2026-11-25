@@ -37,7 +37,9 @@ import { ListenerSet } from "../utils/listener_set";
  *   element, so it is seen from wherever focus sat — the input, or a Save or
  *   Cancel button beside it — and no per-control wiring is required. Focus
  *   landing on another element inside this controller has not left the edit, so
- *   it commits nothing. When `submitOnBlur` is false, editing is kept.
+ *   it commits nothing. A blur with no destination during an inner mouse press
+ *   leaves the edit open for the click or a later departure from the editor.
+ *   When `submitOnBlur` is false, editing is kept.
  * - `save()`, `cancel()`, and `revert()` are actions, so a pointer-only user
  *   reaches every path a keyboard user does. `revert()` restores the value from
  *   before the last save once, for a consumer whose server rejected it.
@@ -93,6 +95,12 @@ export class EditableController extends Controller<HTMLElement> {
   /** Whether `connect()` has run and `disconnect()` has not since. */
   #connected = false;
 
+  /** The primary mouse press that began inside the active editor. */
+  #editorPress: number | null = null;
+
+  /** A blur without a destination while an inner press was in progress. */
+  #deferredBlur = false;
+
   /**
    * Watches focus leaving the editor from wherever it currently sits.
    *
@@ -119,11 +127,59 @@ export class EditableController extends Controller<HTMLElement> {
     // and a Cancel button would save what it promises to discard.
     const next = event.relatedTarget;
     if (next instanceof Node && this.element.contains(next)) return;
-    if (this.submitOnBlurValue) this.#commit(false);
+    if (!this.submitOnBlurValue) return;
+    if (next === null && this.#editorPress !== null) {
+      this.#deferredBlur = true;
+      return;
+    }
+    this.#commit(false);
   };
 
   /** The listeners of one connection, released together on `disconnect()`. */
   readonly #listeners = new ListenerSet();
+
+  /** Document listeners used only while an edit is active. */
+  readonly #editListeners = new ListenerSet();
+
+  /** Records where the press began, before its default action can move focus. */
+  readonly #onPointerDown = (event: PointerEvent): void => {
+    if (event.pointerType !== "mouse" || !event.isPrimary || event.button !== 0) return;
+    const inside = event.composedPath().includes(this.element);
+    this.#editorPress = inside ? event.pointerId : null;
+    if (!inside) this.#commitDeferredBlur();
+  };
+
+  /** Ends the press without racing the click of a control inside the editor. */
+  readonly #onPointerEnd = (event: PointerEvent): void => {
+    if (event.pointerId !== this.#editorPress) return;
+    this.#editorPress = null;
+    if (event.type === "pointerup" && !event.composedPath().includes(this.element)) {
+      this.#commitDeferredBlur();
+    }
+  };
+
+  /** Resolves a deferred blur when focus reaches a definite destination. */
+  readonly #onFocusIn = (event: FocusEvent): void => {
+    if (event.composedPath().includes(this.element)) this.#deferredBlur = false;
+    else this.#commitDeferredBlur();
+  };
+
+  /**
+   * Commits an unresolved blur once a later interaction leaves the editor.
+   * @stimeoRuntimeOnly Reads the current blur policy at the departure.
+   */
+  #commitDeferredBlur(): void {
+    if (!this.#deferredBlur) return;
+    this.#deferredBlur = false;
+    if (this.submitOnBlurValue) this.#commit(false);
+  }
+
+  /** Releases the active edit's listeners and clears any unresolved press. */
+  #clearEditListeners(): void {
+    this.#editListeners.dispose();
+    this.#editorPress = null;
+    this.#deferredBlur = false;
+  }
 
   /** Establishes the initial display mode (display shown, input hidden). */
   override connect(): void {
@@ -141,6 +197,7 @@ export class EditableController extends Controller<HTMLElement> {
     this.#connected = false;
     this.#composition.disconnect();
     this.#listeners.dispose();
+    this.#clearEditListeners();
   }
 
   /** Tracks an input added initially or after connect (e.g. a Turbo swap). */
@@ -179,6 +236,11 @@ export class EditableController extends Controller<HTMLElement> {
     if (this.#isEditing || !this.hasInputTarget || !this.hasDisplayTarget) return;
     this.#previousValue = this.#currentValue;
     this.inputTarget.value = this.#previousValue;
+    const document = this.element.ownerDocument;
+    this.#editListeners.add(document, "pointerdown", this.#onPointerDown, { capture: true });
+    this.#editListeners.add(document, "pointerup", this.#onPointerEnd, { capture: true });
+    this.#editListeners.add(document, "pointercancel", this.#onPointerEnd, { capture: true });
+    this.#editListeners.add(document, "focusin", this.#onFocusIn, { capture: true });
     this.#setMode("editing");
     this.inputTarget.focus();
     this.inputTarget.select();
@@ -284,6 +346,7 @@ export class EditableController extends Controller<HTMLElement> {
 
   /** Records the mode, then brings both elements in line with it. */
   #setMode(mode: "display" | "editing"): void {
+    if (mode === "display") this.#clearEditListeners();
     this.element.dataset.mode = mode;
     this.#applyMode();
   }

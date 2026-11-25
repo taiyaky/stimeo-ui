@@ -19,17 +19,6 @@ afterEach(() => {
   document.documentElement.removeAttribute("lang");
 });
 
-/**
- * Behavioral tests for {@link DateRangePickerController}: two-point range
- * selection with auto-swap, in-progress preview, presets, grid keyboard
- * navigation with roving focus, Escape-to-cancel, Turbo cache cleanup, and the
- * `change` / `monthchange` events.
- *
- * The hidden fields are pre-filled so the view month and confirmed range are
- * deterministic (no dependence on the current date), except where a preset is
- * exercised explicitly.
- */
-
 /** Builds rows containing `count` cell targets, seven cells per row. */
 function gridRows(count = 42): string {
   let rows = "";
@@ -48,6 +37,16 @@ function gridRows(count = 42): string {
   return rows;
 }
 
+/**
+ * Behavioral tests for {@link DateRangePickerController}: two-point range
+ * selection with auto-swap, in-progress preview, presets, grid keyboard
+ * navigation with roving focus, Escape-to-cancel, Turbo cache cleanup, and the
+ * `change` / `monthchange` events.
+ *
+ * The hidden fields are pre-filled so the view month and confirmed range are
+ * deterministic (no dependence on the current date), except where a preset is
+ * exercised explicitly.
+ */
 describe("DateRangePickerController", () => {
   let application: Application;
 
@@ -1298,7 +1297,7 @@ describe("DateRangePickerController", () => {
     expect(cell("2026-06-15").hasAttribute("data-in-range")).toBe(true);
   });
 
-  it("leaves the preview in place when focus rests on an unavailable day", async () => {
+  it("leaves the preview in place when the pointer enters an unavailable day", async () => {
     await mount({ disabledDates: ["2026-06-13"] });
     click("2026-06-11");
     hover("2026-06-12");
@@ -1396,7 +1395,7 @@ describe("DateRangePickerController", () => {
     expect(clickNav("next")).toBe(true);
   });
 
-  it("keeps the focused day of the month across prev and next, clamped to the month", async () => {
+  it("clamps the roving day for the next month and carries it into the following month", async () => {
     await mount({ start: "2026-05-31", end: "2026-05-31" });
 
     navButton("next").dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1463,8 +1462,7 @@ describe("DateRangePickerController", () => {
   });
 
   it("resolves a cross-month preview in the paint that crosses the boundary", async () => {
-    // The target month is not on screen when the key is handled, so this only
-    // works because availability comes from the Values rather than the cells.
+    // Crossing into July leaves its disabled first day out of the preview.
     await mount({ disabledDates: ["2026-07-01"] });
     click("2026-06-30");
 
@@ -1479,7 +1477,7 @@ describe("DateRangePickerController", () => {
     expect(cell("2026-07-02").hasAttribute("data-range-end")).toBe(true);
   });
 
-  it("confirms a range over two cells via Enter, moving focus with arrows", async () => {
+  it("starts a range with Enter, moves with ArrowRight, and confirms with Space", async () => {
     await mount();
     const detail: Array<{ start: string; end: string }> = [];
     root().addEventListener("stimeo--date-range-picker:change", (e) => {

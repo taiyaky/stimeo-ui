@@ -58,6 +58,27 @@ describe("RovingTabindex", () => {
     expect(items[3]?.tabIndex).toBe(0);
     expect(r.activeIndex).toBe(3);
   });
+
+  it("uses an injected writer with a supplied item snapshot before moving focus", () => {
+    const snapshot = [items[2], items[0], items[1]].filter(
+      (item): item is HTMLElement => item !== undefined,
+    );
+    const writes: [HTMLElement, number][] = [];
+    const r = new RovingTabindex(
+      () => {
+        throw new Error("The supplied snapshot must be used");
+      },
+      (item, value) => {
+        writes.push([item, value]);
+        item.tabIndex = value;
+      },
+    );
+    r.setActive(1, { items: snapshot, focus: true });
+
+    expect(writes).toEqual(snapshot.map((item, index) => [item, index === 1 ? 0 : -1]));
+    expect(snapshot.map((item) => item.tabIndex)).toEqual([-1, 0, -1]);
+    expect(document.activeElement).toBe(snapshot[1]);
+  });
 });
 
 describe("rovingMove", () => {

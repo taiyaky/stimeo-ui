@@ -857,6 +857,59 @@ describe("PaginationController", () => {
     expect(prev().hasAttribute(BOUNDARY_ATTR)).toBe(false);
   });
 
+  it.each([
+    ["target", false],
+    ["controller", false],
+    ["target", true],
+    ["controller", true],
+  ] as const)("returns page attributes on %s departure (cached: %s)", async (departure, cached) => {
+    await mount(markup().replace('data-page="1"', 'data-page="1" aria-current="false"'));
+    if (cached) {
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--pagination", PaginationController),
+      );
+    }
+    const [first, second] = pages();
+    expect(first?.getAttribute("aria-current")).toBe("page");
+    expect(second?.getAttribute("aria-current")).toBeNull();
+    if (departure === "target") first?.removeAttribute("data-stimeo--pagination-target");
+    else root().removeAttribute("data-controller");
+    await tick();
+
+    expect(first?.getAttribute("aria-current")).toBe("false");
+    expect(second?.getAttribute("aria-current")).toBeNull();
+  });
+
+  it("keeps current-page state when a page or its entire pagination moves", async () => {
+    await start();
+    const host = root();
+    const page = pages()[0];
+    if (!page) throw new Error("Missing first page");
+    host.append(page);
+    await tick();
+    expect(page.getAttribute("aria-current")).toBe("page");
+
+    host.remove();
+    await tick();
+    expect(page.getAttribute("aria-current")).toBe("page");
+    document.body.append(host);
+    await tick();
+
+    page.removeAttribute("data-stimeo--pagination-target");
+    await tick();
+    expect(page.getAttribute("aria-current")).toBeNull();
+  });
+
+  it("keeps a subsequent page write when the pagination leaves", async () => {
+    await start();
+    const first = pages()[0];
+    first?.setAttribute("aria-current", "location");
+    root().removeAttribute("data-controller");
+    await tick();
+
+    expect(first?.getAttribute("aria-current")).toBe("location");
+  });
+
   it("keeps the boundary disabled and its marker through a teardown, for the next connect", async () => {
     await start(1, 3);
     application.unload("stimeo--pagination");

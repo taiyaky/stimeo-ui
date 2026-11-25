@@ -107,8 +107,11 @@ export class FormFieldController extends Controller<HTMLElement> {
   readonly #ariaInvalid = new AttributeLease<HTMLElement>("aria-invalid", this.identifier, {
     base: true,
   });
+  readonly #errorVisibility = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  readonly #knownErrors = new Set<HTMLElement>();
   /** Watches retained target ids, error visibility, and error content. */
   readonly #observer = new MutationObserver((records) => {
+    this.#returnDepartedErrors();
     if (records.some((record) => this.#isRelevantMutation(record))) {
       this.#reconcile.schedule();
     }
@@ -122,6 +125,16 @@ export class FormFieldController extends Controller<HTMLElement> {
   /** Wires the initial graph and starts retained-target reconciliation. */
   override connect(): void {
     this.#reconcile.activate();
+    this.#returnDepartedErrors();
+
+    const retained = this.#activeControl;
+    if (retained) {
+      if (this.#ariaDescribedBy.adopt(retained, { ifChanged: true })) {
+        this.#baseDescribedBy = this.#externalDescribedByTokens(retained);
+      }
+      this.#ariaErrorMessage.adopt(retained, { ifChanged: true });
+      this.#ariaInvalid.adopt(retained, { ifChanged: true });
+    }
 
     // A restored DOM can contain the invalid hook with no surviving visual
     // message. Treat that one shape as the persisted explicit setError state;
@@ -142,11 +155,15 @@ export class FormFieldController extends Controller<HTMLElement> {
     });
   }
 
-  /** Releases observers, queued work, and ARIA borrowed on the current control. */
+  /** Releases observation and keeps the detached field's state available for reconnection. */
   override disconnect(): void {
     this.#reconcile.cancel();
     this.#observer.disconnect();
-    this.#activeControl && this.#releaseControl(this.#activeControl);
+    const retained = this.scope.containsElement(this.element);
+    if (!retained) this.element.removeAttribute(this.#invalidAttribute);
+    if (this.#activeControl && (this.element.isConnected || !retained)) {
+      this.#releaseControl(this.#activeControl);
+    }
   }
 
   /** Reconciles a control inserted or replaced at runtime. */
@@ -170,12 +187,16 @@ export class FormFieldController extends Controller<HTMLElement> {
   }
 
   /** Reconciles an error region inserted or replaced at runtime. */
-  errorTargetConnected(): void {
+  errorTargetConnected(error: HTMLElement): void {
+    this.#knownErrors.add(error);
     this.#reconcile.schedule();
   }
 
-  /** Removes a departed error from invalid state and the association graph. */
-  errorTargetDisconnected(): void {
+  /** Returns visibility when an error leaves the field and updates the surviving graph. */
+  errorTargetDisconnected(error: HTMLElement): void {
+    if (!this.scope.containsElement(error) || !this.errorTargets.includes(error)) {
+      this.#returnError(error);
+    }
     this.#reconcile.schedule();
   }
 
@@ -197,7 +218,7 @@ export class FormFieldController extends Controller<HTMLElement> {
       this.errorTargets[0]?.replaceChildren(document.createTextNode(message));
     }
     for (const error of this.errorTargets) {
-      error.hidden = (error.textContent ?? "").trim() === "";
+      this.#writeErrorVisibility(error, (error.textContent ?? "").trim() === "");
     }
 
     // setError is an explicit invalid request: it remains invalid even if an
@@ -222,7 +243,7 @@ export class FormFieldController extends Controller<HTMLElement> {
   clearError(): void {
     for (const error of this.errorTargets) {
       error.replaceChildren();
-      error.hidden = true;
+      this.#writeErrorVisibility(error, true);
     }
     this.#explicitInvalid = false;
     this.#reconcileDom();
@@ -255,6 +276,27 @@ export class FormFieldController extends Controller<HTMLElement> {
     );
     const describedBy = this.#uniqueTokens([...this.#baseDescribedBy, ...associationIds]);
     this.#ariaDescribedBy.write(control, describedBy.length > 0 ? describedBy.join(" ") : null);
+  }
+
+  /** Applies the explicit action's visibility over the page's latest error declaration. */
+  #writeErrorVisibility(error: HTMLElement, hidden: boolean): void {
+    this.#knownErrors.add(error);
+    this.#errorVisibility.adopt(error, { ifChanged: true });
+    this.#errorVisibility.write(error, hidden ? "" : null);
+  }
+
+  /** Returns visibility without touching the error's content. */
+  #returnError(error: HTMLElement): void {
+    this.#knownErrors.delete(error);
+    this.#errorVisibility.return(error);
+  }
+
+  /** Releases errors that left between observation windows or within a single mutation batch. */
+  #returnDepartedErrors(): void {
+    const errors = new Set(this.errorTargets);
+    for (const error of this.#knownErrors) {
+      if (!errors.has(error)) this.#returnError(error);
+    }
   }
 
   /** Assigns stable ids before either capture or reflection uses them. */

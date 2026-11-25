@@ -393,9 +393,8 @@ describe("OtpController", () => {
   it("reverses the horizontal arrows under RTL", async () => {
     // Logical direction. `dir="rtl"` is the authoring contract, but happy-dom does
     // not resolve it into the computed style, so the direction is set on the style
-    // directly. The two branches guard different bounds (nothing before the first
-    // field, nothing after the last), so this also pins each guard to its own
-    // direction.
+    // directly. This exercises both RTL arrows and verifies that the backward
+    // arrow stops at the first field.
     const digits = fields();
     root().style.direction = "rtl";
     digits[0]?.focus();
@@ -1320,7 +1319,7 @@ describe("OtpController", () => {
     expect(combined()).toBe("123");
   });
 
-  it("takes the digits a Turbo morph left as committed, so a rejected keystroke keeps them", async () => {
+  it("does not restore the pre-morph digits after a rejected edit when the morph emptied the fields", async () => {
     paste(fields()[0] as HTMLElement, "1234");
     await tick();
     for (const field of fields()) {
@@ -1947,8 +1946,10 @@ describe("OtpController", () => {
     // Simulate compositionend with a full-width digit "９" (resolved from conversion)
     (digits[0] as HTMLInputElement).value = "９";
     digits[0]?.dispatchEvent(new Event("compositionend", { bubbles: true }));
-    // The browser confirms the commit with one more `input` carrying the same text
-    digits[0]?.dispatchEvent(new Event("input", { bubbles: true }));
+    // A composition input can echo the confirmed text after focus has advanced.
+    digits[0]?.dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType: "insertFromComposition" }),
+    );
     await tick();
 
     expect(digits[0]?.value).toBe("9"); // normalized to half-width
@@ -1969,7 +1970,9 @@ describe("OtpController", () => {
     last.dispatchEvent(new Event("compositionstart", { bubbles: true }));
     last.value = "４";
     last.dispatchEvent(new Event("compositionend", { bubbles: true }));
-    last.dispatchEvent(new Event("input", { bubbles: true }));
+    last.dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType: "insertFromComposition" }),
+    );
     await tick();
 
     expect(combined()).toBe("1234");
@@ -2034,8 +2037,10 @@ describe("OtpController", () => {
     expect(digits.map((field) => field.value)).toEqual(["1", "2", "3", ""]);
     expect(document.activeElement).toBe(digits[3]);
 
-    // Re-running the same text would spread it again and drag focus back
-    first.dispatchEvent(new Event("input", { bubbles: true }));
+    // Re-running the same text would spread it again and drag focus back.
+    first.dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType: "insertFromComposition" }),
+    );
     await tick();
 
     expect(digits.map((field) => field.value)).toEqual(["1", "2", "3", ""]);
@@ -2312,26 +2317,32 @@ describe("OtpController", () => {
     expect(document.activeElement).toBe(digits[0]);
   });
 
-  it("never writes disabled or readonly fields", async () => {
-    await remount({
-      count: 4,
-      fieldAttrs: (index) => (index === 2 ? "readonly" : ""),
-    });
-    const digits = fields();
+  it.each([
+    { attribute: "readonly", value: "" },
+    { attribute: "disabled", value: "4" },
+  ])(
+    "preserves and skips a $attribute field during paste and auto-advance",
+    async ({ attribute, value }) => {
+      await remount({
+        count: 4,
+        fieldAttrs: (index) => (index === 2 ? `${attribute} value="${value}"` : ""),
+      });
+      const digits = fields();
 
-    paste(digits[0] as HTMLElement, "5678");
-    await tick();
+      paste(digits[0] as HTMLElement, "5678");
+      await tick();
 
-    expect(digits.map((field) => field.value)).toEqual(["5", "6", "", "7"]);
-    expect(document.activeElement).toBe(digits[3]);
-    expect(combined()).toBe("567");
+      expect(digits.map((field) => field.value)).toEqual(["5", "6", value, "7"]);
+      expect(document.activeElement).toBe(digits[3]);
+      expect(combined()).toBe(`56${value}7`);
 
-    // Auto-advance skips it as well
-    digits[1]?.focus();
-    type(digits[1] as HTMLInputElement, "9");
-    await tick();
-    expect(document.activeElement).toBe(digits[3]);
-  });
+      // Auto-advance skips it as well
+      digits[1]?.focus();
+      type(digits[1] as HTMLInputElement, "9");
+      await tick();
+      expect(document.activeElement).toBe(digits[3]);
+    },
+  );
 
   it("reads the fields back on connect", async () => {
     // A `type="password"` field returns from the Turbo cache emptied, and a
@@ -3098,7 +3109,7 @@ describe("OtpController", () => {
       expect(original.hidden).toBe(true);
     });
 
-    it("keeps an error the page reveals after losing its token", async () => {
+    it("preserves hidden=until-found written by the page before the error target token is removed", async () => {
       type(fields()[0] as HTMLInputElement, "あ");
       await tick();
       const original = errorElement();

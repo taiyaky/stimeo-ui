@@ -6,6 +6,13 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
+interface ObserverRecord {
+  callback: (entries: IntersectionObserverEntry[]) => void;
+  options: IntersectionObserverInit | undefined;
+  observed: Element[];
+  disconnectCount: number;
+}
+
 /**
  * Behavioral tests for {@link ScrollspyController}: the active-section
  * algorithm (trigger line, nested root, non-intersecting fallback, empty
@@ -23,14 +30,6 @@ import { tick } from "./helpers/timing";
  * has to decide when that frame runs. `flushFrames()` is that decision point,
  * and `frameRequests` makes the coalescing itself observable.
  */
-
-interface ObserverRecord {
-  callback: (entries: IntersectionObserverEntry[]) => void;
-  options: IntersectionObserverInit | undefined;
-  observed: Element[];
-  disconnectCount: number;
-}
-
 describe("ScrollspyController", () => {
   let application: Application | undefined;
   let observers: ObserverRecord[];
@@ -414,7 +413,7 @@ describe("ScrollspyController", () => {
 
   // --- Active-section algorithm -----------------------------------------------
 
-  it("toggles aria-current on links according to intersection visibility states", async () => {
+  it("updates aria-current and reports change as the closest intersecting section changes", async () => {
     await start();
     const changeHandler = vi.fn();
     requireElement("#scrollspy").addEventListener("stimeo--scrollspy:change", changeHandler);
@@ -497,15 +496,12 @@ describe("ScrollspyController", () => {
   it("follows the reader through a non-intersecting gap on scroll alone", async () => {
     await start();
 
-    // One batch establishes the tracked set. From here the reader stays inside
-    // a gap far wider than the observation band, so no section crosses a
-    // threshold and a real browser delivers nothing more — `deliver()` is
-    // deliberately not called again.
+    // Deliver only non-intersecting entries, then update the rectangles through scroll alone.
     layoutSections({ intro: -400, usage: 900, api: 1700 });
     deliver([entryFor("intro", false), entryFor("usage", false), entryFor("api", false)]);
     expect(currentIds()).toEqual(["link-intro"]);
 
-    // Scrolled far enough that api is now the section on the trigger line.
+    // The API section becomes closest to the trigger line.
     layoutSections({ intro: -1400, usage: -600, api: 200 });
     scrollAndSettle();
 
@@ -564,9 +560,7 @@ describe("ScrollspyController", () => {
     scrollOn();
     scrollOn();
 
-    // A scroll fires per rendered frame at best and far more often in practice;
-    // measuring once per burst is the difference between one layout read and
-    // one per event.
+    // Three scroll events before the pending animation frame request one re-evaluation.
     expect(frameRequests - before).toBe(1);
 
     flushFrames();
@@ -780,7 +774,7 @@ describe("ScrollspyController", () => {
     expect(currentIds()).toEqual(["link-intro", "link-intro-mobile"]);
   });
 
-  it("reclaims only its own aria-current value from inactive links", async () => {
+  it("preserves aria-current=page on an inactive link while marking the current location", async () => {
     await start(`
       <nav id="scrollspy" aria-label="On this page" data-controller="stimeo--scrollspy"
            data-stimeo--scrollspy-offset-value="80">
@@ -795,7 +789,7 @@ describe("ScrollspyController", () => {
     deliver([entryFor("intro", false), entryFor("usage", true)]);
 
     expect(link("usage").getAttribute("aria-current")).toBe("location");
-    // The author-owned "page" value survives; only "location" is reclaimed.
+    // The inactive link keeps its authored page value.
     expect(link("intro").getAttribute("aria-current")).toBe("page");
   });
 
@@ -1117,7 +1111,7 @@ describe("ScrollspyController", () => {
     // Stimulus reports a target change, and teardown happens before the queued
     // microtask drains. Rebuilding after that would re-observe the sections and
     // re-attach the scroll listener on a detached controller.
-    controller.linkTargetDisconnected();
+    controller.linkTargetDisconnected(link("intro"));
     controller.disconnect();
     await tick();
 
@@ -1125,7 +1119,7 @@ describe("ScrollspyController", () => {
     expect(observers[0]?.disconnectCount).toBe(1);
   });
 
-  it("releases the anchor observer on disconnect", async () => {
+  it("does not rebuild intersection observation after an anchor write following disconnect", async () => {
     await start();
     const controller = controllerFor();
 
@@ -1134,13 +1128,12 @@ describe("ScrollspyController", () => {
     link("api").setAttribute("href", "#faq");
     await tick();
 
-    // No rebuild after teardown: the observer is severed and the queued-rebuild
-    // flag is cleared, so neither channel can resurrect the observation set.
+    // The anchor write after disconnect creates no new intersection observer.
     expect(observers).toHaveLength(1);
     expect(observers[0]?.disconnectCount).toBe(1);
   });
 
-  it("keeps an anchor rewritten while disconnected from disturbing the next retained morph", async () => {
+  it("keeps a fallback-attribute write while disconnected from disturbing the next retained morph", async () => {
     await start();
     const controller = controllerFor();
     layoutSections({ intro: 0, usage: 200, api: 400 });
@@ -1267,8 +1260,9 @@ describe("ScrollspyController", () => {
     await start();
     const controller = controllerFor();
 
+    const departing = link("intro");
     for (const id of ["intro", "usage", "api"]) link(id).remove();
-    controller.linkTargetDisconnected();
+    controller.linkTargetDisconnected(departing);
     await tick();
 
     expect(observers).toHaveLength(1);

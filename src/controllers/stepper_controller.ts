@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { toFiniteNumber } from "../utils/coerce";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
@@ -83,6 +84,9 @@ export class StepperController extends Controller<HTMLElement> {
    * refuses the ones Stimulus delivers before `connect()`, which renders itself.
    */
   readonly #repaint = new MorphRenderWatcher(() => this.#reconcileStep());
+  /** The current-step attribute belongs to each step's first navigation button. */
+  readonly #current = new AttributeLease<HTMLElement>("aria-current", this.identifier);
+  readonly #buttons = new Map<HTMLElement, HTMLElement>();
 
   /**
    * The position shown current last, which the next move is measured from, or
@@ -114,7 +118,13 @@ export class StepperController extends Controller<HTMLElement> {
   }
 
   /** Re-derives every step's state for a step removed at runtime. */
-  stepTargetDisconnected(): void {
+  stepTargetDisconnected(step: HTMLElement): void {
+    if (!this.stepTargets.includes(step)) {
+      step.removeAttribute("data-state");
+      const button = this.#buttons.get(step);
+      if (button) this.#current.return(button);
+      this.#buttons.delete(step);
+    }
     this.#repaint.schedule();
   }
 
@@ -205,12 +215,12 @@ export class StepperController extends Controller<HTMLElement> {
       step.dataset.state =
         index < current ? "complete" : index === current ? "current" : "upcoming";
       const button = step.querySelector<HTMLElement>("button");
+      const previous = this.#buttons.get(step);
+      if (previous && previous !== button) this.#current.return(previous);
+      if (button) this.#buttons.set(step, button);
+      else this.#buttons.delete(step);
       if (!button) return;
-      if (index === current) {
-        button.setAttribute("aria-current", "step");
-      } else {
-        button.removeAttribute("aria-current");
-      }
+      this.#current.write(button, index === current ? "step" : null);
     });
   }
 

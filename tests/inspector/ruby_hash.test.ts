@@ -36,7 +36,7 @@ describe("readDataOption", () => {
       });
     });
 
-    it("reads a quoted key, the only way to spell a hyphenated target attribute", () => {
+    it("reads a quoted key that spells the hyphenated target attribute directly", () => {
       expect(decode(`f.text_area :body, data: { "stimeo--form-field-target": "control" }`)).toEqual(
         {
           "data-stimeo--form-field-target": "control",
@@ -81,7 +81,8 @@ describe("readDataOption", () => {
     });
 
     it("does not read data as a key when the colon is detached", () => {
-      // `data :sym` passes an argument; only `data:` is a hash key.
+      // Here data :controller is an argument with a detached colon, so the scanner
+      // finds no data option.
       expect(readDataOption(`render data :controller`, 0).found).toBe(false);
     });
 
@@ -391,8 +392,8 @@ describe("readDataOption", () => {
       expect(readDataOption('tag.div `data: { controller: "x" }`', 0).found).toBe(false);
     });
 
-    it("ignores a data: key written inside a character literal", () => {
-      // `?d` is one character, so nothing after it belongs to a literal.
+    it("reads a data option after a comma character literal", () => {
+      // The comma character literal ends before the following data option.
       expect(decode(`tag.div sep: ?,, data: { controller: "stimeo--menu" }`)).toEqual({
         "data-controller": "stimeo--menu",
       });

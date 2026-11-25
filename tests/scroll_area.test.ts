@@ -7,15 +7,6 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link ScrollAreaController}: overflow detection, the
- * conditional `tabindex`/`role` on the viewport, `data-scroll` position buckets,
- * the scroll-progress custom property, the `reach` event, and resize teardown.
- *
- * happy-dom has no layout engine, so `scrollHeight`/`clientHeight`/`scrollTop`
- * are stubbed to drive the overflow and position logic deterministically.
- */
-
 const markup = (inner = "") => `
   <div data-controller="stimeo--scroll-area"
        data-stimeo--scroll-area-orientation-value="vertical">
@@ -56,6 +47,14 @@ const withDocumentFonts = async (run: (fonts: FontEvents) => Promise<void>): Pro
   await withFonts(document, fonts, () => run(fonts));
 };
 
+/**
+ * Behavioral tests for {@link ScrollAreaController}: overflow detection, the
+ * conditional `tabindex`/`role` on the viewport, `data-scroll` position buckets,
+ * the scroll-progress custom property, the `reach` event, and resize teardown.
+ *
+ * happy-dom has no layout engine, so `scrollHeight`/`clientHeight`/`scrollTop`
+ * are stubbed to drive the overflow and position logic deterministically.
+ */
 describe("ScrollAreaController", () => {
   let application: Application;
 
@@ -199,6 +198,120 @@ describe("ScrollAreaController", () => {
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
     expect(root().getAttribute("data-overflow")).toBe("true");
     expect(viewport().hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("lends a Tab stop when the checked radio of a descendant's group is outside", async () => {
+    await start(
+      `<input type="radio" name="delivery" checked>${markup(
+        '<input type="radio" name="delivery">',
+      )}`,
+    );
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+    expect(viewport().getAttribute("role")).toBe("region");
+  });
+
+  it.each([
+    ["a checked descendant", '<input type="radio" name="delivery" checked>'],
+    ["an unchecked group", '<input type="radio" name="other">'],
+    ["an unnamed radio", '<input type="radio">'],
+    ["a different form owner", '<form><input type="radio" name="delivery"></form>'],
+    ["a non-radio control", '<input type="checkbox" name="delivery">'],
+  ])("keeps the viewport out of the order beside %s", async (_name, inner) => {
+    await start(`<input type="radio" name="delivery" checked>${markup(inner)}`);
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+    expect(viewport().hasAttribute("role")).toBe(false);
+  });
+
+  it("updates the radio loan on native selection changes and stops on disconnect", async () => {
+    await start(
+      `<input id="outside-radio" type="radio" name="delivery" checked>${markup(
+        '<input id="inside-radio" type="radio" name="delivery">',
+      )}`,
+    );
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    await tick();
+    const inside = document.getElementById("inside-radio") as HTMLInputElement;
+    const outside = document.getElementById("outside-radio") as HTMLInputElement;
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+
+    inside.checked = true;
+    inside.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+    expect(viewport().hasAttribute("role")).toBe(false);
+
+    outside.checked = true;
+    outside.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+    expect(viewport().getAttribute("role")).toBe("region");
+
+    controller()?.disconnect();
+    inside.checked = true;
+    inside.dispatchEvent(new Event("change", { bubbles: true }));
+    outside.checked = true;
+    outside.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+    expect(viewport().hasAttribute("role")).toBe(false);
+    expect(root().hasAttribute("data-overflow")).toBe(false);
+  });
+
+  it("releases radio selection subscriptions when a viewport is replaced or disconnected", async () => {
+    const registrations = vi.spyOn(document, "addEventListener");
+    try {
+      await start(markup());
+      const signals = () =>
+        registrations.mock.calls
+          .filter(([name]) => name === "change")
+          .map(([, , options]) => (typeof options === "object" ? options.signal : undefined));
+      const first = signals()[0];
+      expect(first).toBeDefined();
+      expect(first?.aborted).toBe(false);
+
+      const replacement = detachedViewport(
+        { "aria-label": "Replacement log" },
+        { scrollHeight: 800, clientHeight: 200, scrollTop: 0 },
+      );
+      viewport().replaceWith(replacement);
+      await tick();
+      expect(first?.aborted).toBe(true);
+      const second = signals()[1];
+      expect(second).toBeDefined();
+      expect(second?.aborted).toBe(false);
+
+      controller()?.disconnect();
+      expect(second?.aborted).toBe(true);
+    } finally {
+      registrations.mockRestore();
+    }
+  });
+
+  it("follows radio group membership and naming changes inside the viewport", async () => {
+    await start(
+      `<input type="radio" name="delivery" checked>${markup(
+        '<input id="inside-radio" type="radio" name="delivery">',
+      )}`,
+    );
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+
+    const inside = document.getElementById("inside-radio") as HTMLInputElement;
+    inside.name = "other";
+    await tick();
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+    expect(viewport().hasAttribute("role")).toBe(false);
+
+    inside.name = "delivery";
+    viewport().removeAttribute("aria-label");
+    await tick();
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+    expect(viewport().hasAttribute("role")).toBe(false);
+
+    viewport().setAttribute("aria-label", "Delivery choices");
+    await tick();
+    expect(viewport().getAttribute("role")).toBe("region");
   });
 
   it.each([
@@ -391,8 +504,8 @@ describe("ScrollAreaController", () => {
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
     expect(viewport().getAttribute("tabindex")).toBe("0");
 
-    // Revealing it fires no resize and no scroll, so only the content observer can
-    // notice: the viewport now has its own tab stop and must not add a second one.
+    // The revealed button supplies a Tab stop inside the viewport, so the viewport
+    // gives up its borrowed tabindex.
     (document.getElementById("jump") as HTMLElement).style.display = "";
     await tick();
 
@@ -540,7 +653,7 @@ describe("ScrollAreaController", () => {
     expect(viewport().getAttribute("tabindex")).toBe("0");
   });
 
-  it("rebinds scroll, resize, and content observation when the viewport is replaced", async () => {
+  it("releases the former viewport's attributes and measures the replacement and its content mutations", async () => {
     await start(markup());
     const oldViewport = viewport();
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
@@ -673,12 +786,9 @@ describe("ScrollAreaController", () => {
     }
   });
 
-  it("stops re-checking the content once disconnected", async () => {
-    // The control is visible to begin with, so the viewport holds no tab stop. Hiding it
-    // *after* teardown is the mutation a live observer would answer by adding one — which
-    // is what makes this case detect a missing `#content.disconnect()`. Doing it the other
-    // way round (revealing a control) cannot: the correct answer there is "no tab stop"
-    // either way, so a leaked observer would agree with a torn-down one.
+  it("leaves viewport Tab-stop and region attributes absent after a post-disconnect content change", async () => {
+    // After disconnect, hiding the former focusable control leaves the viewport
+    // without a controller-provided Tab stop or region role.
     await start(markup('<button type="button" id="jump">Jump</button>'));
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
     expect(viewport().hasAttribute("tabindex")).toBe(false);
@@ -1195,8 +1305,8 @@ describe("ScrollAreaController", () => {
 
   it.each([
     [
-      "vertical overflow first",
-      { scrollHeight: 800, clientHeight: 200, scrollTop: 600, scrollWidth: 300, clientWidth: 300 },
+      "vertical overflow first when both axes overflow at different positions",
+      { scrollHeight: 800, clientHeight: 200, scrollTop: 600, scrollWidth: 800, clientWidth: 200 },
       "end",
       "1",
     ],
@@ -1481,8 +1591,8 @@ describe("ScrollAreaController", () => {
     await start(markup("<p>only content</p>"));
     layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 }); // fits → no region
     const phrases = await captureSpeech({ container: root(), steps: 1 });
-    // Freeze the whole ordered array (not a name-only `not.toContain`): with no
-    // overflow the controller exposes no `region` role, so only the content announces.
+    // The simulated speech keeps the viewport's name and paragraph but omits
+    // the region role when the content fits.
     expect(phrases).toEqual(["Log output", "paragraph"]);
   });
 });
